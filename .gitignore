@@ -16,3 +16,4 @@ dist/
 
 # User info yaml file
 user_info.yaml
+*.nc
