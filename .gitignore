@@ -1,0 +1,18 @@
+# Basic python byte-compiled / optimized/ DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg*
+build/
+dist/
+
+# Unit tests
+.pytest_cache/
+
+# Jupyter notebooks & IPython stuff
+.ipynb_checkpoints
+
+# User info yaml file
+user_info.yaml
