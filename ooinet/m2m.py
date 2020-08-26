@@ -345,26 +345,28 @@ class M2M():
                 # Check if it returns an empty dataframe - then fill with NaNs
                 if len(refdes_vocab) == 0:
                     vocab["refdes"].append(refdes)
-                    vocab["array_name"].append(None)
-                    vocab["node_name"].append(None)
+                    vocab["array_name"].append("No record")
+                    vocab["node_name"].append("No record")
+                    vocab["instrument_name"].append("No record")
+
+                # If it isn't empty - Parse the refdes-specific vocab
+                else:
+                    vocab["refdes"].append(refdes)
+                    vocab["array_name"].append(
+                        refdes_vocab["tocL1"].iloc[0] + " " +
+                        refdes_vocab["tocL2"].iloc[0])
+                    vocab["node_name"].append(refdes_vocab["tocL3"].iloc[0])
                     vocab["instrument_name"].append(
                         refdes_vocab["instrument"].iloc[0])
-
-                # Parse the refdes-specific vocab
-                vocab["refdes"].append(refdes)
-                vocab["array_name"].append(refdes_vocab["tocL1"].iloc[0] + " "
-                                           + refdes_vocab["tocL2"].iloc[0])
-                vocab["node_name"].append(refdes_vocab["tocL3"].iloc[0])
-                vocab["instrument_name"].append(
-                    refdes_vocab["instrument"].iloc[0])
 
             # Merge the results with the datasets
             vocab = pd.DataFrame(vocab)
             datasets = datasets.merge(vocab, left_on="refdes",
                                       right_on="refdes")
             # Sort the datasets
-            columns = ["array", "array_name", "node", "node_name", "instrument",
-                       "instrument_name", "refdes", "url", "deployments"]
+            columns = ["array", "array_name", "node", "node_name",
+                       "instrument", "instrument_name", "refdes", "url",
+                       "deployments"]
             datasets = datasets[columns]
 
         return datasets
