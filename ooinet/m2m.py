@@ -175,6 +175,11 @@ class M2M():
             depth = location["depth"]
             lat = location["latitude"]
             lon = location["longitude"]
+            
+            # Sensor info
+            sensor = deployment.get("sensor")
+            uid = sensor["uid"]
+            assetId = sensor["assetId"]
 
             # Start and end times of the deployments
             startTime = self._convert_time(deployment.get("eventStartTime"))
@@ -193,14 +198,14 @@ class M2M():
                 recoverID = None
 
             # Put the data into a pandas dataframe
-            data = np.array([[deploymentNumber, lat, lon, depth, startTime,
-                              stopTime, deployID, recoverID]])
-            columns = ["deploymentNumber", "latitude", "longitude", "depth",
-                       "deployStart", "deployEnd", "deployCruise",
-                       "recoverCruise"]
+            data = np.array([[deploymentNumber, uid, assetId, lat, lon, depth, 
+                              startTime, stopTime, deployID, recoverID]])
+            columns = ["deploymentNumber", "uid", "assetId",  "latitude",
+                       "longitude", "depth", "deployStart", "deployEnd",
+                       "deployCruise", "recoverCruise"]
             df = pd.DataFrame(data=data, columns=columns)
 
-            #
+            # Generate the table results
             results = results.append(df)
 
         return results
