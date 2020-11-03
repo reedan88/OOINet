@@ -622,31 +622,110 @@ class M2M():
             print(f'Downloading file {count} of {len(datasets)}: {dset} \n')
             a = urlretrieve(file_url, '/'.join((save_dir, filename)))
 
-    def load_netCDF_files(self, netCDF_datasets):
-        """Open the netCDF files directly from the THREDDS opendap server."""
+    def _reprocess_dataset(self, ds):
+        """Reprocess the netCDF dataset to conform to CF-standards.
+        
+        Parameters
+        ----------
+        ds: (xarray.DataSet)
+            An opened xarray dataset of the netCDF file.
+            
+        Returns
+        -------
+        ds: (xarray.DataSet)
+            Reprocessed xarray DataSet
+        """ 
+        # Remove the *_qartod_executed variables
+        qartod_pattern = re.compile(r"^.+_qartod_executed.+$")
+        for v in ds.variables:
+            if qartod_pattern.match(v):
+                # the shape of the QARTOD executed should compare to the provenance variable
+                if ds[v].shape[0] != ds["provenance"].shape[0]:
+                    ds = ds.drop_vars(v)
+
+        # Reset the dimensions and coordinates
+        ds = ds.swap_dims({"obs": "time"})
+        ds = ds.reset_coords()
+        keys = ["obs", "id", "provenance", "driver_timestamp", "ingestion_timestamp",
+                'port_timestamp', 'preferred_timestamp']
+        for key in keys:
+            if key in ds.variables:
+                ds = ds.drop_vars(key)
+        ds = ds.sortby('time')
+
+        # clear-up some global attributes we will no longer be using
+        keys = ['DODS.strlen', 'DODS.dimName', 'DODS_EXTRA.Unlimited_Dimension',
+                '_NCProperties', 'feature_Type']
+        for key in keys:
+            if key in ds.attrs:
+                del(ds.attrs[key])
+
+        # Fix the dimension encoding
+        if ds.encoding['unlimited_dims']:
+            del ds.encoding['unlimited_dims']
+
+        # resetting cdm_data_type from Point to Station and the featureType from point to timeSeries
+        ds.attrs['cdm_data_type'] = 'Station'
+        ds.attrs['featureType'] = 'timeSeries'
+
+        # update some of the global attributes
+        ds.attrs['acknowledgement'] = 'National Science Foundation'
+        ds.attrs['comment'] = 'Data collected from the OOI M2M API and reworked for use in locally stored NetCDF files.'
+
+        return ds
+        
+    def _load_datasets(self, datasets, ds=None):
+        """Load and reprocess netCDF datasets recursively."""
+        while len(datasets) > 0:
+            
+            dset = datasets.pop()
+            new_ds = xr.open_dataset(dset)
+            new_ds = self._reprocess_dataset(new_ds)
+            
+            if ds is None:
+                ds = new_ds
+            else:
+                ds = xr.concat([new_ds, ds], dim="time")
+            
+            ds = self._load_datasets(datasets, ds)
+        
+        return ds
+    
+    def load_netCDF_datasets(self, datasets, ds=None):
+        """Open the netCDF files directly from the THREDDS opendap server.
+        
+        Parameters
+        ----------
+        datasets: (list)
+            A list of the netCDF datasets to open
+            
+        Returns
+        -------
+        ds: (xarray.DataSet)
+            A xarray DataSet of the concatenated and reprocessed netCDF
+            datasets into a single xarray DataSet object.
+            
+        """
         # Get the OpenDAP server
         opendap_url = "https://opendap.oceanobservatories.org/thredds/dodsC"
 
         # Add the OpenDAP url to the netCDF dataset names
         netCDF_datasets = ["/".join((opendap_url, dset)) for dset in
-                           netCDF_datasets]
-
+                           datasets]
+        
         # Note: latest version of xarray and netcdf-c libraries enforce strict
         # fillvalue match, which causes an error with the implement OpenDAP
         # data mapping. Requires appending #fillmismatch to open the data
         netCDF_datasets = [dset+"#fillmismatch" for dset in netCDF_datasets]
-
-        # Open the datasets into an xarray dataset, make time the main
-        # dimension, and sort
-        with xr.open_mfdataset(netCDF_datasets) as ds:
-            ds = ds.swap_dims({"obs": "time"})
-            ds = ds.sortby("time")
-
+        
+        # Load the datasets into a concatenated xarray DataSet
+        ds = self._load_datasets(netCDF_datasets)
+        
         # Add in the English name of the dataset
         refdes = "-".join(ds.attrs["id"].split("-")[:4])
         vocab = self.get_vocab(refdes)
         ds.attrs["Location_name"] = " ".join((vocab["tocL1"].iloc[0],
                                               vocab["tocL2"].iloc[0],
                                               vocab["tocL3"].iloc[0]))
-        # Return the dataset
+        
         return ds
