@@ -402,6 +402,30 @@ class M2M():
 
         # Return the results
         return stream_df
+    
+    def get_annotations(self, refdes):
+        """Retrieve data annotations for a given reference designator."""
+        # Build the request url
+        anno_url = self.url["anno"] + "?beginDT=0&refdes=" + refdes
+        
+        # Get the annotations as a json and put into a dataframe
+        anno_data = self._get_api(anno_url)
+        anno_data = pd.DataFrame(anno_data)
+        
+        # Convert the flags to QARTOD flags
+        codes = {
+            None: 0,
+            'pass': 1,
+            'not_evaluated': 2,
+            'suspect': 3,
+            'fail': 4,
+            'not_operational': 9,
+            'not_available': 9,
+            'pending_ingest': 9
+        }
+        anno_data['qcFlag'] = anno_data['qcFlag'].map(codes).astype('category')
+        
+        return anno_data
 
     def get_parameter_data_levels(self, metadata):
         """Get parameters processing levels.
