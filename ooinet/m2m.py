@@ -50,9 +50,9 @@ class M2M():
             'cal': 'https://ooinet.oceanobservatories.org/api/m2m/12587/asset/cal'
         }
 
-    def _get_api(self, url):
+    def _get_api(self, url, params=None):
         """Request the given url from OOINet."""
-        r = requests.get(url, auth=(self.username, self.token))
+        r = requests.get(url, params=params, auth=(self.username, self.token))
         data = r.json()
         return data
 
@@ -70,6 +70,12 @@ class M2M():
             return None
         else:
             return datetime.datetime.utcfromtimestamp(ms/1000)
+
+    def _unix_epoch_time(self, date_time):
+        """Convert a datetime to unix epoch microseconds."""
+        # Convert the date time to a string
+        date_time = int(pd.to_datetime(date_time).strftime("%s"))*1000
+        return date_time
 
     def get_metadata(self, refdes):
         """Request metadata.
@@ -175,7 +181,7 @@ class M2M():
             depth = location["depth"]
             lat = location["latitude"]
             lon = location["longitude"]
-            
+
             # Sensor info
             sensor = deployment.get("sensor")
             uid = sensor["uid"]
@@ -198,7 +204,7 @@ class M2M():
                 recoverID = None
 
             # Put the data into a pandas dataframe
-            data = np.array([[deploymentNumber, uid, assetId, lat, lon, depth, 
+            data = np.array([[deploymentNumber, uid, assetId, lat, lon, depth,
                               startTime, stopTime, deployID, recoverID]])
             columns = ["deploymentNumber", "uid", "assetId",  "latitude",
                        "longitude", "depth", "deployStart", "deployEnd",
@@ -262,7 +268,8 @@ class M2M():
 
             # Put the data into a dictionary
             info = pd.DataFrame(data=np.array([[array, node, instrument,
-                                                refdes, search_url, deployments]]),
+                                                refdes, search_url, deployments
+                                                ]]),
                                 columns=["array", "node", "instrument",
                                          "refdes", "url", "deployments"])
             # add the dictionary to the dataframe
@@ -402,16 +409,50 @@ class M2M():
 
         # Return the results
         return stream_df
-    
-    def get_annotations(self, refdes):
-        """Retrieve data annotations for a given reference designator."""
-        # Build the request url
-        anno_url = self.url["anno"] + "?beginDT=0&refdes=" + refdes
-        
+
+    def get_annotations(self, refdes, **kwargs):
+        """Retrieve data annotations for a given reference designator.
+
+        Parameters
+        ----------
+        refdes: (str)
+            The reference designator which to query OOINet for the
+            associated annotation data.
+
+        Kwargs
+        ------
+        method: (str)
+            An OOINet method associated with the reference designator.
+            Limits annotations for the given reference designator
+            to only that method.
+        stream: (str)
+            An OOINet stream associated with the reference designator.
+            Limits annotations for the given reference designator
+            to only that stream.
+        beginDT: (str)
+            Limit the data request to only data after this date. Date
+            should be formatted using OOINet epoch time (can be
+            calculated using _)
+        endDT: (str)
+            Limit the data request to only data before this date.
+        """
+        # Need to build a parameters dictionary to pass to requests
+        params = {"refdes": refdes}
+        for key in kwargs:
+            val = kwargs.get(key)
+            # Convert datetimes to unix epoch
+            if key == "beginDT":
+                val = self._unix_epoch_time(val)
+            elif key == "endDT":
+                val = self._unix_epoch_time(val)
+            else:
+                pass
+            params.update({key: val})
+
         # Get the annotations as a json and put into a dataframe
-        anno_data = self._get_api(anno_url)
+        anno_data = self._get_api(self.urls["anno"], params=params)
         anno_data = pd.DataFrame(anno_data)
-        
+
         # Convert the flags to QARTOD flags
         codes = {
             None: 0,
@@ -424,8 +465,120 @@ class M2M():
             'pending_ingest': 9
         }
         anno_data['qcFlag'] = anno_data['qcFlag'].map(codes).astype('category')
-        
+
         return anno_data
+
+    def add_annotation_qc_flag(self, ds, annotations):
+        """Add the annotation qc flags to a dataset as a data variable.
+
+        From the annotations, add the QARTOD flags to the dataset for
+        each relevant data variable in the annotations.
+
+        Parameters
+        ----------
+        ds: (xarray.DataSet)
+            The xarray dataset containing the OOI data for a given
+            reference designator-method-stream
+        annotations: (pandas.DataFrame)
+            A dataframe with contains the annotations to add to the
+            dataset
+
+        Returns
+        -------
+        ds: (xarray.DataSet)
+            The input xarray dataset with the annotation qc flags
+            added as a named variable to the dataset.
+        """
+        # First, filter only for annotations which apply to the dataset
+        stream = ds.attrs["stream"]
+        stream_mask = annotations["stream"].apply(lambda x: True if x == stream
+                                                  or x is None else False)
+        annotations = annotations[stream_mask]
+
+        # Second, explode the annotations so each parameter is hit for each
+        # annotation
+        annotations = annotations.explode(column="parameters")
+
+        # Third, get the unique parameters and their associated variable name
+        stream_annos = {}
+        for pid in annotations["parameters"].unique():
+            if np.isnan(pid):
+                param_name = "rollup"
+            else:
+                param_info = self._get_api(self.urls["preload"]
+                                           + "/" + str(pid))
+                param_name = param_info["name"]
+            stream_annos.update({param_name: pid})
+
+        # ----------------------------------------------------------------------
+        # Next, get the flags associated with each parameter or all parameters
+        flags_dict = {}
+
+        for key in stream_annos.keys():
+            # Get the pid and associated name
+            pid_name = key
+            pid = stream_annos.get(key)
+
+            # Get the annotations associated with the pid
+            if np.isnan(pid):
+                pid_annos = annotations[annotations["parameters"].isna()]
+            else:
+                pid_annos = annotations[annotations["parameters"] == pid]
+
+            pid_annos = pid_annos.sort_values(by="qcFlag")
+
+            # Create an array of flags to begin setting the qc-values
+            pid_flags = pd.Series(np.zeros(ds.time.values.shape),
+                                  index=ds.time.values)
+
+            # For each index, set the qcFlag for each respective time period
+            for ind in pid_annos.index:
+                beginDT = pid_annos["beginDT"].loc[ind]
+                endDT = pid_annos["endDT"].loc[ind]
+                qcFlag = pid_annos["qcFlag"].loc[ind]
+                # Convert the time to actual datetimes
+                beginDT = self._convert_time(beginDT)
+                if endDT is None or np.isnan(endDT):
+                    endDT = datetime.datetime.now()
+                else:
+                    endDT = self._convert_time(endDT)
+                # Set the qcFlags for the given time range
+                pid_flags[(pid_flags.index > beginDT) & (pid_flags.index < endDT)] = qcFlag
+
+            # Save the results
+            flags_dict.update({pid_name: pid_flags})
+
+        # --------------------
+        # Create a rollup flag
+        rollup_flags = flags_dict.get("rollup")
+        for key in flags_dict:
+            flags = np.max([rollup_flags, flags_dict.get(key)], axis=0)
+            rollup_flags = pd.Series(flags, index=rollup_flags.index)
+        # Replace the "All" with the rollup results
+        flags_dict["rollup"] = rollup_flags
+
+        # --------------------
+        # Add the flag results to the dataset for key in flags_dict
+        for key in flags_dict.keys():
+            # Generate a variable name
+            var_name = "_".join((key.lower(), "annotations", "qc", "results"))
+
+            # Next, build the attributes dictionary
+            if key.lower() == "rollup":
+                comment = "These qc flags are a rollup summary which represents a Human-in-the-loop (HITL) assessment of the data quality for all applicable data variables in the dataset."
+            else:
+                comment = f"These qc flags represent a Human-in-the-loop (HITL) assessment of the data quality for the specific data variable {key}."
+            long_name = f"{key} qc_flag"
+            attrs = {
+                "comment": comment,
+                "long_name": long_name
+            }
+
+            # Now add to the dataset
+            flags = xr.DataArray(flags_dict.get(key), dims="time", attrs=attrs)
+            ds[var_name] = flags
+
+        return ds
 
     def get_parameter_data_levels(self, metadata):
         """Get parameters processing levels.
@@ -549,12 +702,13 @@ class M2M():
 
         Parameters
         ----------
-                thredds_url (str): the THREDDS server url for the
-                    requested data stream
+        thredds_url (str): the THREDDS server url for the
+            requested data stream
 
-            Returns:
-                catalog (list): the THREDDS catalog of datasets for
-                    the requested data stream
+        Returns
+        -------
+        catalog (list): the THREDDS catalog of datasets for
+            the requested data stream
         """
         # ==========================================================
         # Parse out the dataset_id from the thredds url
@@ -648,38 +802,40 @@ class M2M():
 
     def _reprocess_dataset(self, ds):
         """Reprocess the netCDF dataset to conform to CF-standards.
-        
+
         Parameters
         ----------
         ds: (xarray.DataSet)
             An opened xarray dataset of the netCDF file.
-            
+
         Returns
         -------
         ds: (xarray.DataSet)
             Reprocessed xarray DataSet
-        """ 
+        """
         # Remove the *_qartod_executed variables
         qartod_pattern = re.compile(r"^.+_qartod_executed.+$")
         for v in ds.variables:
             if qartod_pattern.match(v):
-                # the shape of the QARTOD executed should compare to the provenance variable
+                # the shape of the QARTOD executed should compare to the
+                # provenance variable
                 if ds[v].shape[0] != ds["provenance"].shape[0]:
                     ds = ds.drop_vars(v)
 
         # Reset the dimensions and coordinates
         ds = ds.swap_dims({"obs": "time"})
         ds = ds.reset_coords()
-        keys = ["obs", "id", "provenance", "driver_timestamp", "ingestion_timestamp",
-                'port_timestamp', 'preferred_timestamp']
+        keys = ["obs", "id", "provenance", "driver_timestamp",
+                "ingestion_timestamp", 'port_timestamp', 'preferred_timestamp']
         for key in keys:
             if key in ds.variables:
                 ds = ds.drop_vars(key)
         ds = ds.sortby('time')
 
         # clear-up some global attributes we will no longer be using
-        keys = ['DODS.strlen', 'DODS.dimName', 'DODS_EXTRA.Unlimited_Dimension',
-                '_NCProperties', 'feature_Type']
+        keys = ['DODS.strlen', 'DODS.dimName',
+                'DODS_EXTRA.Unlimited_Dimension', '_NCProperties',
+                'feature_Type']
         for key in keys:
             if key in ds.attrs:
                 del(ds.attrs[key])
@@ -688,7 +844,8 @@ class M2M():
         if ds.encoding['unlimited_dims']:
             del ds.encoding['unlimited_dims']
 
-        # resetting cdm_data_type from Point to Station and the featureType from point to timeSeries
+        # resetting cdm_data_type from Point to Station and the featureType
+        # from point to timeSeries
         ds.attrs['cdm_data_type'] = 'Station'
         ds.attrs['featureType'] = 'timeSeries'
 
@@ -697,38 +854,38 @@ class M2M():
         ds.attrs['comment'] = 'Data collected from the OOI M2M API and reworked for use in locally stored NetCDF files.'
 
         return ds
-        
+
     def _load_datasets(self, datasets, ds=None):
         """Load and reprocess netCDF datasets recursively."""
         while len(datasets) > 0:
-            
+
             dset = datasets.pop()
             new_ds = xr.open_dataset(dset)
             new_ds = self._reprocess_dataset(new_ds)
-            
+
             if ds is None:
                 ds = new_ds
             else:
                 ds = xr.concat([new_ds, ds], dim="time")
-            
+
             ds = self._load_datasets(datasets, ds)
-        
+
         return ds
-    
+
     def load_netCDF_datasets(self, datasets, ds=None):
         """Open the netCDF files directly from the THREDDS opendap server.
-        
+
         Parameters
         ----------
         datasets: (list)
             A list of the netCDF datasets to open
-            
+
         Returns
         -------
         ds: (xarray.DataSet)
             A xarray DataSet of the concatenated and reprocessed netCDF
             datasets into a single xarray DataSet object.
-            
+
         """
         # Get the OpenDAP server
         opendap_url = "https://opendap.oceanobservatories.org/thredds/dodsC"
@@ -736,20 +893,20 @@ class M2M():
         # Add the OpenDAP url to the netCDF dataset names
         netCDF_datasets = ["/".join((opendap_url, dset)) for dset in
                            datasets]
-        
+
         # Note: latest version of xarray and netcdf-c libraries enforce strict
         # fillvalue match, which causes an error with the implement OpenDAP
         # data mapping. Requires appending #fillmismatch to open the data
         netCDF_datasets = [dset+"#fillmismatch" for dset in netCDF_datasets]
-        
+
         # Load the datasets into a concatenated xarray DataSet
         ds = self._load_datasets(netCDF_datasets)
-        
+
         # Add in the English name of the dataset
         refdes = "-".join(ds.attrs["id"].split("-")[:4])
         vocab = self.get_vocab(refdes)
         ds.attrs["Location_name"] = " ".join((vocab["tocL1"].iloc[0],
                                               vocab["tocL2"].iloc[0],
                                               vocab["tocL3"].iloc[0]))
-        
+
         return ds
