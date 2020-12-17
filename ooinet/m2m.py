@@ -665,6 +665,12 @@ class M2M():
                 '%Y-%m-%dT%H:%M:%S.%fZ')
 
         # Build the query
+        if len(kwargs) == 0:
+            kwargs = {"require_deployment":True}
+        else:
+            kwargs.update({
+                "require_deployment":True
+            })
         params = kwargs
 
         # Request the data
