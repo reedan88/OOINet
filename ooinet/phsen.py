@@ -537,3 +537,68 @@ class PHSEN(Instrument):
             ds[v] = ds[v].astype('int32')
 
         return ds
+    
+    def quality_checks(self, ds):
+        """
+        Assessment of the raw data and the calculated seawater pH for quality
+        using a susbset of the QARTOD flags to indicate the quality. QARTOD
+        flags used are:
+            1 = Pass
+            3 = Suspect or of High Interest
+            4 = Fail
+        Suspect flags are set based on experience with the instrument and the data
+        produced by it. Failed flags are based on code provided by the vendor. The
+        final flag value represents the worst case assessment of the data quality.
+        :param ds: xarray dataset with the raw signal data and the calculated
+                   seawater pH
+        :return qc_flag: array of flag values indicating seawater pH quality
+        """
+        max_bits = 4096                                # max measurement value
+        qc_flag = ds['time'].astype('int32') * 0 + 1   # default flag values, no errors
+
+        # test suspect indicator signals -- values starting to get too low for a good calculation
+        m434 = ds.signal_434 < max_bits / 12  # value based on what would be considered too low for blanks
+        m578 = ds.signal_578 < max_bits / 12  # value based on what would be considered too low for blanks
+        m = np.any([m434.all(axis=1), m578.all(axis=1)], axis=0)
+        qc_flag[m] = 3
+
+        # test suspect flat indicator signals -- indicates pump might be starting to fail or otherwise become obstructed.
+        m434 = ds.signal_434.std(axis=1) < 180  # test level is 3x the fail level
+        m578 = ds.signal_578.std(axis=1) < 180  # test level is 3x the fail level
+        m = np.any([m434, m578], axis=0)
+        qc_flag[m] = 3
+
+        # test for suspect pH values -- user range set to 7.4 and 8.6
+        m = (ds.seawater_ph.values < 7.4) | (ds.seawater_ph.values > 8.6)   # from real-world expectations
+        qc_flag[m] = 3
+
+        # test for suspect reference measurements -- erratic reference measurements, with larger than usual variability.
+        m434 = ds.reference_434.std(axis=1) > 10  # value based on 5x of normal standard deviations
+        m578 = ds.reference_578.std(axis=1) > 10  # value based on 5x of normal standard deviations
+        m = np.any([m434, m578], axis=0)
+        qc_flag[m] = 3
+
+        # test for failed blank measurements -- blank measurements either too high (saturated signal) or too low.
+        m434 = (ds.blank_signal_434 > max_bits - max_bits / 20) | (ds.blank_signal_434 < max_bits / 12)
+        m578 = (ds.blank_signal_578 > max_bits - max_bits / 20) | (ds.blank_signal_578 < max_bits / 12)
+        m = np.any([m434.all(axis=1), m578.all(axis=1)], axis=0)
+        qc_flag[m] = 4
+
+        # test for failed intensity measurements -- intensity measurements either too high (saturated signal) or too low.
+        m434 = (ds.signal_434 > max_bits - max_bits / 20) | (ds.signal_434 < 5)
+        m578 = (ds.signal_578 > max_bits - max_bits / 20) | (ds.signal_578 < 5)
+        m = np.any([m434.all(axis=1), m578.all(axis=1)], axis=0)
+        qc_flag[m] = 4
+
+        # test for flat intensity measurements -- indicates pump isn't working or the flow cell is otherwise obstructed.
+        m434 = ds.signal_434.std(axis=1) < 60
+        m578 = ds.signal_578.std(axis=1) < 60
+        m = np.any([m434, m578], axis=0)
+        qc_flag[m] = 4
+
+        # test for out of range pH values -- sensor range set to 6.9 and 9.0
+        m = (ds.seawater_ph.values < 6.9) | (ds.seawater_ph.values > 9.0)
+        qc_flag[m] = 4
+
+        return qc_flag
+
