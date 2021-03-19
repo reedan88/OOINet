@@ -235,7 +235,7 @@ class PCO2W(Instrument):
             ds[v] = ds[v].astype('float32')
 
         # reset some attributes
-        for key, value in ATTRS.items():
+        for key, value in self.attrs.items():
             for atk, atv in value.items():
                 if key in ds.variables:
                     ds[key].attrs[atk] = atv
