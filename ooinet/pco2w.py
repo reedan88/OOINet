@@ -67,8 +67,8 @@ class PCO2W(Instrument):
                 'ooinet_variable_name': 'light_measurements'
             },
             'signal_434': {
-                'long_name': 'Signal Intensity at 620 nm',
-                'comment': ('Optical absorbance signal intensity at 620 nm. Reference and signal intensities range '
+                'long_name': 'Signal Intensity at 434 nm',
+                'comment': ('Optical absorbance signal intensity at 434 nm. Reference and signal intensities range '
                             'between 0 and 4096. Values should be greater than ~1500. Lower intensities will result in '
                             'higher noise in the absorbance and pCO2 measurements. Obtained from the light_measurements'
                             'variable in the Data Portal sourced data file.'),
@@ -245,3 +245,72 @@ class PCO2W(Instrument):
             ds[value].attrs['ooinet_variable_name'] = key
 
         return ds
+    
+    def quality_checks(self, ds):
+        """
+        Assessment of the raw data and the calculated seawater pCO2 for quality
+        using a susbset of the QARTOD flags to indicate the quality. QARTOD
+        flags used are:
+            1 = Pass
+            3 = Suspect or of High Interest
+            4 = Fail
+        Suspect flags are set based on ranges provided by the vendor. The final
+        flag represents the worst case assessment of the data quality.
+        
+        Parameters
+        ----------
+        ds: (xarray.Dataset)
+            An xarray dataset of the PCO2W data
+            
+        Returns
+        -------
+        ds: (xarray.Dataset)
+            The PCO2W dataset returned with a new data variable 'qc_flags'
+            which contains information about
+        """
+        qc_flag = ds.time.astype("int32") * 0 + 1
+
+        # Check the dark reference & signal values
+        refDark = (ds.dark_reference.mean(dim="duplicates") < 50) | (ds.dark_reference.mean(dim="duplicates") > 200)
+        qc_flags[refDark] = 3
+        sigDark = (ds.dark_signal.mean(dim="duplicates") < 50) | (ds.dark_signal.mean(dim="duplicates") > 200)
+        qc_flags[sigDark] = 3
+
+        # Check the 434 reference & signal values for suspect values
+        ref434 = (ds.reference_434.mean(dim="duplicates") < 1500)
+        qc_flags[ref434] = 3
+        sig434 = (ds.signal_434.mean(dim="duplicates") < 1500)
+        qc_flags[sig434] = 3
+
+        # Check the 620 nm reference & signal values for suspect values
+        ref620 = (ds.reference_620.mean(dim="duplicates") < 1500)
+        qc_flags[ref620] = 3
+        sig620 = (ds.signal_620.mean(dim="duplicates") < 1500)
+        qc_flags[ref620] = 3
+
+        # Check the 434 reference & signal values for bad values
+        ref434 = (ds.reference_434.mean(dim="duplicates") < 0) | (ds.reference_434.mean(dim="duplicates") > 4096)
+        qc_flags[ref434] = 4
+        sig434 = (ds.signal_434.mean(dim="duplicates") < 0) | (ds.signal_434.mean(dim="duplicates") > 4096)
+        qc_flags[sig434] = 4
+
+        # Check the 620 reference & signal values for bad values
+        ref620 = (ds.reference_620.mean(dim="duplicates") < 0) | (ds.reference_620.mean(dim="duplicates") > 4096)
+        qc_flags[ref620] = 4
+        sig620 = (ds.signal_620.mean(dim="duplicates") < 0) | (ds.signal_620.mean(dim="duplicates") > 4096)
+        qc_flags[sig620] = 4
+        
+        # Add some attributes to the quality flags
+        qc_flags.attrs = {
+            "long_name": "Quality Flags",
+            "comment": ("Assessment of the raw light intensity measurment data for quality using a " + 
+                       "subset of the QARTOD flags to indicate quality. QARTOD flags used are: 1 = Pass; " +
+                       "3 = Suspect; 4 = Fail. Suspect and Fail flags are determined using ranges provided " +
+                       "by the vendor.")
+        }
+        
+        # Now add it to the dataframe
+        ds.qc_flags = qc_flags
+
+        return ds   
+        
