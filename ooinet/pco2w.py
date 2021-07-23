@@ -268,7 +268,7 @@ class PCO2W(Instrument):
             The PCO2W dataset returned with a new data variable 'qc_flags'
             which contains information about
         """
-        qc_flag = ds.time.astype("int32") * 0 + 1
+        qc_flags = ds.time.astype("int32") * 0 + 1
 
         # Check the dark reference & signal values
         refDark = (ds.dark_reference.mean(dim="duplicates") < 50) | (ds.dark_reference.mean(dim="duplicates") > 200)
@@ -310,7 +310,7 @@ class PCO2W(Instrument):
         }
         
         # Now add it to the dataframe
-        ds.qc_flags = qc_flags
+        ds["qc_flags"] = qc_flags
 
         return ds   
-        
+
