@@ -276,7 +276,7 @@ class M2M():
                         "deploymentNumber": int(depNum),
                         "uid": uid,
                         "calCoef": calData["eventName"],
-                        "calDate": convert_time(calData["eventStartTime"]),
+                        "calDate": self._convert_time(calData["eventStartTime"]),
                         "value": calData["value"],
                         "calFile": calData["dataSource"]
                     }, ignore_index=True)
