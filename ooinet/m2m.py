@@ -215,6 +215,74 @@ class M2M():
             results = results.append(df)
 
         return results
+    
+    def get_calibrations(self, refdes, deployments):
+        """Get calibrations for deployments for a given reference designator.
+        
+        Return the effective calibrations for a given reference designator
+        for all of the deployments.
+        
+        Parameters
+        ----------
+        refdes: (str)
+            The reference designator for the instrument for which to request
+            vocab information.
+        deployments: (pandas.DataFrame)
+            A dataframe with the given deployments for a reference designator
+            as returned by the get_deployments method.
+            
+        Returns
+        -------
+        calibrations: (pandas.DataFrame)
+            A table of the calibration information for the given reference
+            designator for all of the deployments specified by the 
+            deployments dataframe.
+        """
+        
+        # Initalize a dataframe to store calibration info
+        columns = ["deploymentNumber", "uid", "calCoef", "calDate", "value", "calFile"]
+        calibrations = pd.DataFrame(columns=columns)
+
+        # Iterate through each deployment to get associated calibration data
+        for depNum in deployments["deploymentNumber"]:
+            
+            # Select the deployment specific info
+            depInfo = deployments[deployments["deploymentNumber"] == depNum]
+
+            # Get the request time for a single deployment
+            startTime = depInfo["deployStart"][0]
+            endTime = depInfo["deployEnd"][0]
+            if endTime is None:
+                endTime = datetime.datetime.now()
+
+            # Get the UID
+            uid = depInfo["uid"][0]
+
+            # Build the params dictionary
+            params = {
+                "refdes": refdes,
+                "uid": uid,
+                "beginDT": startTime.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "endDT": endTime.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            }
+
+            # Request the calibration data for a single deployment
+            calInfo = self._get_api(self.urls["cal"], params=params)
+
+            # Reformat the calibration info
+            for cal in calInfo["calibration"]:
+                for calData in cal["calData"]:
+                    calibrations = calibrations.append({
+                        "deploymentNumber": int(depNum),
+                        "uid": uid,
+                        "calCoef": calData["eventName"],
+                        "calDate": convert_time(calData["eventStartTime"]),
+                        "value": calData["value"],
+                        "calFile": calData["dataSource"]
+                    }, ignore_index=True)
+                    
+        # Return the calibration results
+        return calibrations
 
     def get_vocab(self, refdes):
         """Get OOI vocabulary.
