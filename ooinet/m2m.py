@@ -11,6 +11,7 @@ from urllib.request import urlopen
 from urllib.request import urlretrieve
 
 
+
 class M2M():
     """Request data from ooinet.oceanobservatories.org (OOINet) API by M2M.
 
@@ -786,7 +787,7 @@ class M2M():
         """
         # ==========================================================
         # Parse out the dataset_id from the thredds url
-        server_url = 'https://opendap-east.oceanobservatories.org/thredds/'
+        server_url = 'https://opendap.oceanobservatories.org/thredds/'
         dataset_id = re.findall(r'(ooi/.*)/catalog', thredds_url)[0]
 
         # Check the status of the request until the datasets are ready
@@ -851,7 +852,7 @@ class M2M():
             The full path to the directory where to download the netCDF files.
         """
         # Specify the server url
-        server_url = 'https://opendap-east.oceanobservatories.org/thredds/'
+        server_url = 'https://opendap.oceanobservatories.org/thredds/'
 
         # Specify and make the relevant save directory
         if save_dir is not None:
@@ -962,7 +963,7 @@ class M2M():
 
         """
         # Get the OpenDAP server
-        opendap_url = "https://opendap-east.oceanobservatories.org/thredds/dodsC"
+        opendap_url = "https://opendap.oceanobservatories.org/thredds/dodsC"
 
         # Add the OpenDAP url to the netCDF dataset names
         netCDF_datasets = ["/".join((opendap_url, dset)) for dset in
