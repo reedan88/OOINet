@@ -1,6 +1,7 @@
 import re
 import os
 import time
+import sys
 import requests
 import datetime
 import numpy as np
@@ -9,7 +10,12 @@ import xarray as xr
 from xml.dom import minidom
 from urllib.request import urlopen
 from urllib.request import urlretrieve
-
+from urllib3.util import Retry
+from requests.adapters import HTTPAdapter
+from tqdm import tqdm
+import dask
+from dask.diagnostics import ProgressBar
+from bs4 import BeautifulSoup
 
 
 class M2M():
@@ -39,9 +45,9 @@ class M2M():
             The OOINet supplied authentication token. Requires registration.
             May be found in your user profile.
         """
-        self.username = USERNAME
-        self.token = TOKEN
-        self.urls = {
+        self.USERNAME = USERNAME
+        self.TOKEN = TOKEN
+        self.URLS = {
             'data': 'https://ooinet.oceanobservatories.org/api/m2m/12576/sensor/inv',
             'anno': 'https://ooinet.oceanobservatories.org/api/m2m/12580/anno/find',
             'vocab': 'https://ooinet.oceanobservatories.org/api/m2m/12586/vocab/inv',
@@ -50,12 +56,28 @@ class M2M():
             'preload': 'https://ooinet.oceanobservatories.org/api/m2m/12575/parameter',
             'cal': 'https://ooinet.oceanobservatories.org/api/m2m/12587/asset/cal'
         }
+        self.ENCODINGS = {
+            "time": {"_FillValue": None},
+            "lon": {"_FillValue": None},
+            "lat": {"_FillValue": None},
+            "z": {"_FillValue": None}
+        }
+        # Initialize a requests session
+        self.SESSION = requests.Session()
+        retry = Retry(connect=5, backoff_factor=0.5)
+        adapter = HTTPAdapter(max_retries=retry)
+        self.SESSION.mount("https://", adapter)
+        
+        # Set the REFDES attribute to None
+        self.REFDES = None
 
     def _get_api(self, url, params=None):
         """Request the given url from OOINet."""
-        r = requests.get(url, params=params, auth=(self.username, self.token))
-        data = r.json()
-        return data
+        r = self.SESSION.get(url, params=params, auth=(self.USERNAME, self.TOKEN))
+        if r.status_code == requests.codes.ok:
+            return r.json()
+        else:
+            return None
 
     def _ntp_seconds_to_datetime(self, ntp_seconds):
         """Convert OOINet timestamps to unix-convertable timestamps."""
@@ -98,7 +120,7 @@ class M2M():
         """
         # First, construct the metadata request url
         array, node, instrument = refdes.split("-", 2)
-        metadata_request_url = "/".join((self.urls["data"], array, node,
+        metadata_request_url = "/".join((self.URLS["data"], array, node,
                                          instrument, "metadata"))
 
         # Request the metadata
@@ -160,7 +182,7 @@ class M2M():
         """
         # First, build the request
         array, node, instrument = refdes.split("-", 2)
-        deploy_url = "/".join((self.urls["deploy"], array, node, instrument,
+        deploy_url = "/".join((self.URLS["deploy"], array, node, instrument,
                                deploy_num))
 
         # Next, get the deployments from the deploy url. The API returns a list
@@ -217,6 +239,38 @@ class M2M():
 
         return results
     
+    def _reformat_calInfo(calInfo, deployNum, uid):
+        """Reformats calibration information returned from OOINet."""
+        calDataFrame = pd.DataFrame()
+        # Reformat the calibration information
+        for cal in calInfo["calibration"]:
+            for calData in cal["calData"]:
+                calDataFrame = calDataFrame.append({
+                    "deploymentNumber": int(deployNum),
+                    "uid": uid,
+                    "calCoef": calData["eventName"],
+                    "calDate": self._convert_time(calData["eventStartTime"]),
+                    "value": calData["value"],
+                    "calFile": calData["dataSource"]
+                }, ignore_index=True)
+                
+        return calDataFrame
+    
+    def _reformat_calInfo(self, calInfo, deployNum, uid):
+        """Internal method to reformat calibration info"""
+        calDataFrame = pd.DataFrame()
+        # Reformat the calibration info
+        for cal in calInfo["calibration"]:
+            for calData in cal["calData"]:
+                calDataFrame = calDataFrame.append({
+                    "deploymentNumber": int(deployNum),
+                    "uid": uid,
+                    "calCoef": calData["eventName"],
+                    "value": calData["value"],
+                    "calFile": calData["dataSource"]
+                }, ignore_index=True)
+        return calDataFrame  
+    
     def get_calibrations(self, refdes, deployments):
         """Get calibrations for deployments for a given reference designator.
         
@@ -239,50 +293,43 @@ class M2M():
             designator for all of the deployments specified by the 
             deployments dataframe.
         """
-        
-        # Initalize a dataframe to store calibration info
-        columns = ["deploymentNumber", "uid", "calCoef", "calDate", "value", "calFile"]
-        calibrations = pd.DataFrame(columns=columns)
+        # Create a dask delayed object to gather the calibrations for the
+        # instrument from each deployment
+        cals = []
+        for ind, row in deployments.iterrows():
 
-        # Iterate through each deployment to get associated calibration data
-        for depNum in deployments["deploymentNumber"]:
-            
-            # Select the deployment specific info
-            depInfo = deployments[deployments["deploymentNumber"] == depNum]
+            # Get the relevant request data
+            deployNum, uid, deployStart, deployEnd = row["deploymentNumber"], row["uid"], row["deployStart"], row["deployEnd"]
 
-            # Get the request time for a single deployment
-            startTime = depInfo["deployStart"][0]
-            endTime = depInfo["deployEnd"][0]
-            if endTime is None:
-                endTime = datetime.datetime.now()
+            # Reformat the deployStart and deployEnd
+            if pd.isna(deployEnd):
+                deployEnd = datetime.datetime.now()
 
-            # Get the UID
-            uid = depInfo["uid"][0]
-
-            # Build the params dictionary
+            # Construct the request parameters
             params = {
                 "refdes": refdes,
                 "uid": uid,
-                "beginDT": startTime.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                "endDT": endTime.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                "beginDT": deployStart.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "endDT": deployEnd.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             }
 
-            # Request the calibration data for a single deployment
-            calInfo = self._get_api(self.urls["cal"], params=params)
+            # Request the data
+            calInfo = dask.delayed(self._get_api)(self.URLS["cal"], params)
 
-            # Reformat the calibration info
-            for cal in calInfo["calibration"]:
-                for calData in cal["calData"]:
-                    calibrations = calibrations.append({
-                        "deploymentNumber": int(depNum),
-                        "uid": uid,
-                        "calCoef": calData["eventName"],
-                        "calDate": self._convert_time(calData["eventStartTime"]),
-                        "value": calData["value"],
-                        "calFile": calData["dataSource"]
-                    }, ignore_index=True)
-                    
-        # Return the calibration results
+            # Reformat the data
+            calDataFrame =  dask.delayed(self._reformat_calInfo)(calInfo, deployNum, uid)
+
+            cals.append(calDataFrame)
+        
+        # Execute and get the calibrations for each deployment
+        with ProgressBar():
+            print(f"Fetching calibrations for {refdes}:")
+            cals = dask.compute(cals)
+
+        # Append individual calibrations into a single dataframe
+        calibrations = pd.DataFrame()
+        for cal in cals:
+            calibrations = calibrations.append(cal, ignore_index=True)
         return calibrations
 
     def get_vocab(self, refdes):
@@ -305,7 +352,7 @@ class M2M():
         """
         # First, construct the vocab request url
         array, node, instrument = refdes.split("-", 2)
-        vocab_url = "/".join((self.urls["vocab"], array, node, instrument))
+        vocab_url = "/".join((self.URLS["vocab"], array, node, instrument))
 
         # Next, get the vocab data
         data = self._get_api(vocab_url)
@@ -331,7 +378,7 @@ class M2M():
             refdes = "-".join((array, node, instrument))
 
             # Get the available deployments
-            deploy_url = "/".join((self.urls["deploy"], array, node,
+            deploy_url = "/".join((self.URLS["deploy"], array, node,
                                    instrument))
             deployments = self._get_api(deploy_url)
 
@@ -388,7 +435,7 @@ class M2M():
             available in OOINet (slow).
         """
         # Build the request url
-        dataset_url = f'{self.urls["data"]}/{array}/{node}/{instrument}'
+        dataset_url = f'{self.URLS["data"]}/{array}/{node}/{instrument}'
 
         # Truncate the url at the first "none"
         dataset_url = dataset_url[:dataset_url.find("None")-1]
@@ -456,7 +503,7 @@ class M2M():
         """Retrieve methods and data streams for a reference designator."""
         # Build the url
         array, node, instrument = refdes.split("-", 2)
-        method_url = "/".join((self.urls["data"], array, node, instrument))
+        method_url = "/".join((self.URLS["data"], array, node, instrument))
 
         # Build a table linking the reference designators, methods, and data
         # streams
@@ -519,7 +566,7 @@ class M2M():
             params.update({key: val})
 
         # Get the annotations as a json and put into a dataframe
-        anno_data = self._get_api(self.urls["anno"], params=params)
+        anno_data = self._get_api(self.URLS["anno"], params=params)
         anno_data = pd.DataFrame(anno_data)
 
         # Convert the flags to QARTOD flags
@@ -574,7 +621,7 @@ class M2M():
             if np.isnan(pid):
                 param_name = "rollup"
             else:
-                param_info = self._get_api(self.urls["preload"]
+                param_info = self._get_api(self.URLS["preload"]
                                            + "/" + str(pid))
                 param_name = param_info["name"]
             stream_annos.update({param_name: pid})
@@ -670,7 +717,7 @@ class M2M():
         pid_dict = {}
         for pid in pdIds:
             # Build the preload url
-            preload_url = "/".join((self.urls["preload"], pid.strip("PD")))
+            preload_url = "/".join((self.URLS["preload"], pid.strip("PD")))
             # Query the preload data
             preload_data = self._get_api(preload_url)
             data_level = preload_data.get("data_level")
@@ -720,9 +767,13 @@ class M2M():
         thredds_url: (str)
             A url to the OOI Thredds server which contains the desired datasets
         """
+        # Set the refdes as an attribute
+        if self.REFDES is None:
+            self.REFDES = refdes
+
         # Build the data request url
         array, node, instrument = refdes.split("-", 2)
-        data_request_url = "/".join((self.urls["data"], array, node,
+        data_request_url = "/".join((self.URLS["data"], array, node,
                                      instrument, method, stream))
 
         # Ensure proper datetime format for the request
@@ -743,13 +794,29 @@ class M2M():
         params = kwargs
 
         # Request the data
-        r = requests.get(data_request_url, params=params, auth=(self.username,
-                                                                self.token))
-        if r.status_code == 200:
+        r = self.SESSION.get(data_request_url, params=params, auth=(self.USERNAME, self.TOKEN))
+        
+        if r.status_code == requests.codes.ok:
             data_urls = r.json()
         else:
             print(r.reason)
             return None
+        
+        # NEW: Wait until OOINet has finished processing to fulfill the request
+        print(f"Waiting for {refdes}-{method}-{stream} to process.")
+        status_url = [url for url in data_urls["allURLs"] if re.match(r'.*async_results.*', url)][0]
+        status_url = status_url + "/status.txt"
+        with tqdm(total=400, desc="Waiting", file=sys.stdout) as bar:
+            for i in range(400):
+                r = self.SESSION.get(status_url)
+                bar.update()
+                bar.refresh()
+                if r.status_code == requests.codes.ok:
+                    bar.n = 400
+                    bar.last_print_n = 400
+                    break
+                else:
+                    time.sleep(3)
 
         # The asynchronous data request is contained in the 'allURLs' key,
         # in which we want to find the url to the thredds server
@@ -758,18 +825,6 @@ class M2M():
                 thredds_url = d
 
         return thredds_url
-
-    def _get_elements(self, url, tag_name, attribute_name):
-        """Get elements from an XML file."""
-        usock = urlopen(url)
-        xmldoc = minidom.parse(usock)
-        usock.close()
-        tags = xmldoc.getElementsByTagName(tag_name)
-        attributes = []
-        for tag in tags:
-            attribute = tag.getAttribute(attribute_name)
-            attributes.append(attribute)
-        return attributes
 
     def get_thredds_catalog(self, thredds_url):
         """
@@ -787,25 +842,10 @@ class M2M():
         """
         # ==========================================================
         # Parse out the dataset_id from the thredds url
-        server_url = 'https://opendap.oceanobservatories.org/thredds/'
-        dataset_id = re.findall(r'(ooi/.*)/catalog', thredds_url)[0]
-
-        # Check the status of the request until the datasets are ready
-        # Will timeout if request takes longer than 10 mins
-        status_url = thredds_url + '?dataset=' + dataset_id + '/status.txt'
-        status = requests.get(status_url)
-        start_time = time.time()
-        while status.status_code != requests.codes.ok:
-            elapsed_time = time.time() - start_time
-            status = requests.get(status_url)
-            if elapsed_time > 10*60:
-                print(f'Request time out for {thredds_url}')
-                return None
-            time.sleep(5)
-
-        # Parse the datasets from the catalog for the requests url
-        catalog_url = server_url + dataset_id + '/catalog.xml'
-        catalog = self._get_elements(catalog_url, 'dataset', 'urlPath')
+        page = self.SESSION.get(thredds_url).text
+        soup = BeautifulSoup(page, "html.parser")
+        pattern = re.compile('.*\\.nc$')
+        catalog = sorted([node.get('href') for node in soup.find_all('a', text=pattern)])
 
         return catalog
 
@@ -837,7 +877,7 @@ class M2M():
             datasets = [dset for dset in datasets if ex not in dset]
         return datasets
 
-    def download_netCDF_files(self, datasets, save_dir=None):
+    def download_netCDF_files(self, catalog, saveDir=None):
         """Download netCDF files for given netCDF datasets.
 
         Downloads the netCDF files returned by parse_catalog. If no path is
@@ -851,30 +891,55 @@ class M2M():
         save_dir: (str)
             The full path to the directory where to download the netCDF files.
         """
-        # Specify the server url
-        server_url = 'https://opendap.oceanobservatories.org/thredds/'
+        ## Step 1 - parse the catalog to get the correct web address to download the files
+        fileServer = "https://opendap.oceanobservatories.org/thredds/fileServer/"
+        netCDF_files = [re.sub("catalog.html\?dataset=", fileServer, file) for file in catalog]
 
         # Specify and make the relevant save directory
-        if save_dir is not None:
+        if saveDir is not None:
             # Make the save directory if it doesn't exists
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
+            if not os.path.exists(saveDir):
+                os.makedirs(saveDir)
         else:
-            save_dir = os.getcwd()
+            saveDir = os.getcwd()
 
         # Download and save the netCDF files from the HTTPServer
         # to the save directory
-        count = 0
-        for dset in datasets:
-            # Check that the datasets are netCDF
-            if not dset.endswith('.nc'):
-                raise ValueError(f'Dataset {dset} not netCDF.')
-            count += 1
-            file_url = server_url + 'fileServer/' + dset
-            filename = file_url.split('/')[-1]
-            print(f'Downloading file {count} of {len(datasets)}: {dset} \n')
-            a = urlretrieve(file_url, '/'.join((save_dir, filename)))
+        download = []
+        for file in netCDF_files:
+            filename = file.split("/")[-1]
+            download.append(dask.delayed(urlretrieve)(file, "/".join((saveDir, filename))))
+            
+        with ProgressBar():
+            print(f"Downloading files to {saveDir}")
+            dask.compute(download)
 
+
+    def _check_files(self, netCDF_files):
+        """Internal method checks netCDF files if they are bad or empty."""
+        
+        def check_length(data, filename):
+            length = len(data["time"])
+            if length > 2:
+                return filename
+            else:
+                pass
+
+        # Okay, try redoing this approach to not break
+        lengths = []
+        for file in netCDF_files:
+            # First, open the file
+            data = dask.delayed(xr.open_dataset)(file)
+            # Second, check the length of the primary index
+            length = dask.delayed(check_length)(data, file)
+            lengths.append(length)
+        
+        print("Checking and removing bad files: ")
+        with ProgressBar():
+            good_files = dask.compute(*lengths)
+            
+        return list(good_files)
+    
     def _reprocess_dataset(self, ds):
         """Reprocess the netCDF dataset to conform to CF-standards.
 
@@ -929,31 +994,54 @@ class M2M():
         ds.attrs['comment'] = 'Data collected from the OOI M2M API and reworked for use in locally stored NetCDF files.'
 
         return ds
+    
+    def _trim_datasets(self, ds):
+        """Internal method trims datasets to avoid overlapping time dimensions."""
+        # --------------------------------
+        # First, get the deployments
+        deployments = self.get_deployments(self.REFDES)
 
-    def _load_datasets(self, datasets, ds=None):
-        """Load and reprocess netCDF datasets recursively."""
-        while len(datasets) > 0:
+        # --------------------------------
+        # Second, get the deployment times
+        deployments = deployments.sort_values(by="deploymentNumber")
+        deployments = deployments.set_index(keys="deploymentNumber")
+        # Shift the start times by (-1) 
+        deployEnd = deployments["deployStart"].shift(-1)
+        # Find where the deployEnd times are earlier than the deployStart times
+        mask = deployments["deployEnd"] > deployEnd
+        # Wherever the deployEnd times occur after the shifted deployStart times, replace those deployEnd times
+        deployments["deployEnd"][mask] = deployEnd[mask]
+        deployments["deployEnd"] = deployments["deployEnd"].apply(lambda x: pd.to_datetime(x))
 
-            dset = datasets.pop()
-            new_ds = xr.open_dataset(dset)
-            new_ds = self._reprocess_dataset(new_ds)
+        # ---------------------------------
+        # With the deployments info, can write a preprocess function to filter 
+        # the data based on the deployment number
+        depNum = np.unique(ds["deployment"])
+        deployInfo = deployments.loc[depNum]
+        deployStart = deployInfo["deployStart"].values[0]
+        deployEnd = deployInfo["deployEnd"].values[0]
 
-            if ds is None:
-                ds = new_ds
-            else:
-                ds = xr.concat([new_ds, ds], dim="time")
-
-            ds = self._load_datasets(datasets, ds)
+        # Select the dataset data which falls within the specified time range
+        ds = ds.sel(time=slice(deployStart, deployEnd))
 
         return ds
+    
+    def _preprocess(self, ds):
+        """Internal preprocess routine to feed into xarray.open_mfdataset"""
+        # --------------------------------
+        ds = self._reprocess_dataset(ds)
+        ds = self._trim_datasets(ds)
+        return ds
 
-    def load_netCDF_datasets(self, datasets, ds=None):
+    def load_netCDF_datasets(self, catalog):
         """Open the netCDF files directly from the THREDDS opendap server.
 
         Parameters
         ----------
-        datasets: (list)
-            A list of the netCDF datasets to open
+        catalog: (list)
+            A list of the netCDF datasets from the THREDDS catalog to open
+            into an xarray DataSet. Note: Data will NOT be loaded into 
+            memory.
 
         Returns
         -------
@@ -962,20 +1050,25 @@ class M2M():
             datasets into a single xarray DataSet object.
 
         """
-        # Get the OpenDAP server
-        opendap_url = "https://opendap.oceanobservatories.org/thredds/dodsC"
-
-        # Add the OpenDAP url to the netCDF dataset names
-        netCDF_datasets = ["/".join((opendap_url, dset)) for dset in
-                           datasets]
-
-        # Note: latest version of xarray and netcdf-c libraries enforce strict
-        # fillvalue match, which causes an error with the implement OpenDAP
-        # data mapping. Requires appending #fillmismatch to open the data
-        netCDF_datasets = [dset+"#fillmismatch" for dset in netCDF_datasets]
+        # Outline how to process the code
+        # -------------------------------
+        # First, need to rename the filenames with the proper heading
+        dodsC = "https://opendap.oceanobservatories.org/thredds/dodsC/"
+        netCDF_files = [re.sub("catalog.html\?dataset=", dodsC, file) for file in catalog]
+        
+        # -------------------------------
+        # Second, 
+        netCDF_files = [f+"#fillmismatch" for f in netCDF_files]
+        
+        # -------------------------------
+        # Third, check and remove any files which are malformed
+        # and remove the bad ones
+        netCDF_files = self._check_files(netCDF_files)
 
         # Load the datasets into a concatenated xarray DataSet
-        ds = self._load_datasets(netCDF_datasets)
+        with ProgressBar():
+            print("\n"+f"Loading netCDF_files for {self.REFDES}:")
+            ds = xr.open_mfdataset(netCDF_files, preprocess=self._preprocess, parallel=True)
 
         # Add in the English name of the dataset
         refdes = "-".join(ds.attrs["id"].split("-")[:4])
@@ -985,3 +1078,5 @@ class M2M():
                                               vocab["tocL3"].iloc[0]))
 
         return ds
+
+
