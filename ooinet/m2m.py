@@ -54,7 +54,12 @@ class M2M():
             'asset': 'https://ooinet.oceanobservatories.org/api/m2m/12587',
             'deploy': 'https://ooinet.oceanobservatories.org/api/m2m/12587/events/deployment/inv',
             'preload': 'https://ooinet.oceanobservatories.org/api/m2m/12575/parameter',
-            'cal': 'https://ooinet.oceanobservatories.org/api/m2m/12587/asset/cal'
+            'cal': 'https://ooinet.oceanobservatories.org/api/m2m/12587/asset/cal',
+            'fileServer':"https://opendap.oceanobservatories.org/thredds/fileServer/",
+            'dodsC': "https://opendap.oceanobservatories.org/thredds/dodsC/",
+            "goldCopy": "https://thredds.dataexplorer.oceanobservatories.org/thredds/catalog/ooigoldcopy/public/",
+            "goldCopy_fileServer": "https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/",
+            "goldCopy_dodsC": "https://thredds.dataexplorer.oceanobservatories.org/thredds/dodsC/"
         }
         self.ENCODINGS = {
             "time": {"_FillValue": None},
@@ -735,7 +740,7 @@ class M2M():
         else:
             return False
 
-    def get_thredds_url(self, refdes, method, stream, **kwargs):
+    def get_thredds_url(self, refdes, method, stream, goldCopy=False, **kwargs):
         """
         Return the url for the THREDDS server for the desired dataset(s).
 
@@ -772,8 +777,12 @@ class M2M():
             self.REFDES = refdes
 
         # Build the data request url
-        array, node, instrument = refdes.split("-", 2)
-        data_request_url = "/".join((self.URLS["data"], array, node,
+        if goldCopy is True:
+            goldCopy_url = self.URLS["goldCopy"] + "-".join((self.REFDES, method, stream)) + "/catalog.html"
+            return goldCopy_url
+        else:
+            array, node, instrument = refdes.split("-", 2)
+            data_request_url = "/".join((self.URLS["data"], array, node,
                                      instrument, method, stream))
 
         # Ensure proper datetime format for the request
@@ -877,7 +886,7 @@ class M2M():
             datasets = [dset for dset in datasets if ex not in dset]
         return datasets
 
-    def download_netCDF_files(self, catalog, saveDir=None):
+    def download_netCDF_files(self, catalog, goldCopy=False, saveDir=None):
         """Download netCDF files for given netCDF datasets.
 
         Downloads the netCDF files returned by parse_catalog. If no path is
@@ -888,11 +897,16 @@ class M2M():
         ----------
         datasets: (list)
             The netCDF datasets to download
-        save_dir: (str)
+        saveDir: (str)
             The full path to the directory where to download the netCDF files.
+        goldCopy: (boolean)
+            If you should use the gold copy thredds server (which is static)
         """
         ## Step 1 - parse the catalog to get the correct web address to download the files
-        fileServer = "https://opendap.oceanobservatories.org/thredds/fileServer/"
+        if goldCopy is True:
+            goldCopy = self.URLS["goldCopy_fileServer"]
+        else:
+            fileServer = self.URLS["fileServer"]
         netCDF_files = [re.sub("catalog.html\?dataset=", fileServer, file) for file in catalog]
 
         # Specify and make the relevant save directory
@@ -1033,7 +1047,7 @@ class M2M():
         ds = self._trim_datasets(ds)
         return ds
 
-    def load_netCDF_datasets(self, catalog):
+    def load_netCDF_datasets(self, catalog, goldCopy=False):
         """Open the netCDF files directly from the THREDDS opendap server.
 
         Parameters
@@ -1053,7 +1067,10 @@ class M2M():
         # Outline how to process the code
         # -------------------------------
         # First, need to rename the filenames with the proper heading
-        dodsC = "https://opendap.oceanobservatories.org/thredds/dodsC/"
+        if goldCopy is True:
+            dodsC = self.URLS["goldCopy_dodsC"]
+        else:
+            dodsC = self.URLS["dodsC"]
         netCDF_files = [re.sub("catalog.html\?dataset=", dodsC, file) for file in catalog]
         
         # -------------------------------
@@ -1063,7 +1080,7 @@ class M2M():
         # -------------------------------
         # Third, check and remove any files which are malformed
         # and remove the bad ones
-        netCDF_files = self._check_files(netCDF_files)
+        # netCDF_files = self._check_files(netCDF_files)
 
         # Load the datasets into a concatenated xarray DataSet
         with ProgressBar():
