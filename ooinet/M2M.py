@@ -13,8 +13,8 @@ from bs4 import BeautifulSoup
 from urllib.request import urlretrieve
 
 # Import shared utilies
-from pyOOI.utils import ntp_seconds_to_datetime, convert_time, unix_epoch_time
-from pyOOI.Download import setup_download_dir, download_file, DownloadWorker
+from utils import ntp_seconds_to_datetime, convert_time, unix_epoch_time
+from Download import setup_download_dir, download_file, DownloadWorker
 
 # Initialize credentials
 try:
@@ -445,6 +445,35 @@ def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
     results = results.reset_index(drop=True)
 
     return results
+
+
+def get_datastreams(refdes):
+        """Retrieve methods and data streams for a reference designator."""
+        # Build the url
+        array, node, instrument = refdes.split("-", 2)
+        method_url = "/".join((URLS["data"], array, node, instrument))
+
+        # Build a table linking the reference designators, methods, and data
+        # streams
+        stream_df = pd.DataFrame(columns=["refdes", "method", "stream"])
+        methods = get_api(method_url)
+        for method in methods:
+            if "bad" in method:
+                continue
+            stream_url = "/".join((method_url, method))
+            streams = get_api(stream_url)
+            stream_df = stream_df.append({
+                "refdes": refdes,
+                "method": method,
+                "stream": streams
+            }, ignore_index=True)
+
+        # Expand so that each row of the dataframe is unique
+        stream_df = stream_df.explode('stream').reset_index(drop=True)
+
+        # Return the results
+        return stream_df
+    
 
 
 def parse_metadata(metadata):
