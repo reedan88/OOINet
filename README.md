@@ -48,7 +48,7 @@ The key parameters which the OOINet API requires is the "reference designator." 
 ## Meta
 Andrew Reed <br>
 mailto:areed@whoi.edu <br>
-Distributed under the ```MIT``` license. See ```setup.py``` for more information. <br>
+Distributed under the ```GPU GPLv3``` license. See ```setup.py``` for more information. <br>
 [https://github.com/reedan88/OOINet](https://github.com/reedan88/OOINet)
 
 
