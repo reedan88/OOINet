@@ -20,7 +20,7 @@ Before using the tool you will need to register an account on [ooinet.oceanobser
 
   <figure>
   <img src="figures/user_profile_screen.png">
-  </figure><b>
+  </figure>
 
   * On your user profile page, save the "API Username" and "API Token"
 
