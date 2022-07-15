@@ -3,8 +3,8 @@ import datetime
 import numpy as np
 import pandas as pd
 import xarray as xr
-from pyOOI import M2M
-from pyOOI.utils import convert_time, ntp_seconds_to_datetime, unix_epoch_time
+import M2M
+from utils import convert_time, ntp_seconds_to_datetime, unix_epoch_time
 
 def process_file(ds):
     """
