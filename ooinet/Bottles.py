@@ -1,5 +1,6 @@
 import re
 import pandas as pd
+from ooinet import haversine as hs
 
 class QualityFlags():
     """QARTOD QC-flag definitions"""

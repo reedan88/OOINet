@@ -13,8 +13,8 @@ from bs4 import BeautifulSoup
 from urllib.request import urlretrieve
 
 # Import shared utilies
-from utils import ntp_seconds_to_datetime, convert_time, unix_epoch_time
-from Download import setup_download_dir, download_file, DownloadWorker
+from ooinet.utils import ntp_seconds_to_datetime, convert_time, unix_epoch_time
+from ooinet.Download import setup_download_dir, download_file, DownloadWorker
 
 # Initialize credentials
 try:

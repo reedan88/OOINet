@@ -3,8 +3,8 @@ import datetime
 import numpy as np
 import pandas as pd
 import xarray as xr
-import M2M
-from utils import convert_time, ntp_seconds_to_datetime, unix_epoch_time
+from ooinet import M2M
+from ooinet.utils import convert_time, ntp_seconds_to_datetime, unix_epoch_time
 
 def process_file(ds):
     """
@@ -28,8 +28,11 @@ def process_file(ds):
     for v in ds.variables:
         if qartod_pattern.match(v):
             # the shape of the QARTOD executed variables should compare to the provenance variable
-            if ds[v].shape != ds['provenance'].shape:
-                ds = ds.drop_vars(v)
+            try:
+                if ds[v].shape != ds['provenance'].shape:
+                    ds = ds.drop_vars(v)
+            except:
+                pass
 
     # convert the dimensions from obs to time and get rid of obs and other variables we don't need
     ds = ds.swap_dims({'obs': 'time'})
@@ -63,8 +66,10 @@ def process_file(ds):
         if key in ds.attrs:
             del(ds.attrs[key])
 
-    if ds.encoding['unlimited_dims']:
-        del ds.encoding['unlimited_dims']
+    keys = list(ds.encoding.keys())
+    for key in keys:
+        if key == 'unlimited_dims':
+            del ds.encoding[key]
 
     # resetting cdm_data_type from Point to Station and the featureType from point to timeSeries
     ds.attrs['cdm_data_type'] = 'Station'
