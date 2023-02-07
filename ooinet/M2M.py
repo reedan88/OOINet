@@ -137,9 +137,9 @@ def search_datasets(array=None, node=None, instrument=None,
     # Truncate the url at the first "none"
     dataset_url = dataset_url[:dataset_url.find("None")-1]
 
-    with HaloNotebook(f"Searching {dataset_url}", spinner="clock"):
-        # Get the datasets
-        datasets = get_datasets(dataset_url)
+    print(f"Searching {dataset_url}")
+    # Get the datasets
+    datasets = get_datasets(dataset_url)
 
     # Now, it node is not None, can filter on that
     if node is not None:
@@ -473,7 +473,7 @@ def get_datastreams(refdes):
 
         # Return the results
         return stream_df
-    
+
 
 
 def parse_metadata(metadata):
@@ -682,16 +682,20 @@ def get_thredds_url(refdes, method, stream, goldCopy=False, **kwargs):
     params = kwargs
 
     # Request the data
-    with HaloNotebook(text="Waiting for request to process", spinner="clock"):
-        # Get the urls
-        urls = get_api(data_request_url, params=params)
-        # Check the status of the dataset preparation
-        status_url = [url for url in urls["allURLs"] if re.match(r'.*async_results.*', url)][0]
-        status_url = status_url + "/status.txt"
+    print("Waiting for request to process")
+    # Get the urls
+    urls = get_api(data_request_url, params=params)
+    # Check the status of the dataset preparation
+    status_url = [url for url in urls["allURLs"] if re.match(r'.*async_results.*', url)][0]
+    status_url = status_url + "/status.txt"
+    status = SESSION.get(status_url)
+    dt = 0
+    while status.status_code != requests.codes.ok:
+        time.sleep(2)
+        dt += 2
+        if dt%2 == 0 and dt%5 == 0:
+            print("Waiting for request to process")
         status = SESSION.get(status_url)
-        while status.status_code != requests.codes.ok:
-            time.sleep(2)
-            status = SESSION.get(status_url)
 
     # The asynchronous data request is contained in the 'allURLs' key,
     # in which we want to find the url to the thredds server
@@ -767,14 +771,14 @@ def download_netCDF_files(catalog, goldCopy=False, saveDir=None, verbose=True):
         worker.daemon = True
         worker.start()
 
-    # Step 4. Execute the processes and download the files        
-    with HaloNotebook(f"Downloading...", spinner="clock"):
-        for file in netCDF_files:
-            queue.put((saveDir, file))
-        # Execute
-        queue.join()
-        
-        
+    # Step 4. Execute the processes and download the files
+    print("----- Downloading files -----")
+    for file in netCDF_files:
+        queue.put((saveDir, file))
+    # Execute
+    queue.join()
+
+
 def clean_catalog(catalog, stream, deployments):
     """Clean up the THREDDS catalog of unwanted datasets"""
     # Parse the netCDF datasets to only get those with the datastream in its name
