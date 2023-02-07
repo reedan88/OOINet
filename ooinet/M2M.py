@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from queue import Queue
-from halo import HaloNotebook
 from bs4 import BeautifulSoup
 from urllib.request import urlretrieve
 
