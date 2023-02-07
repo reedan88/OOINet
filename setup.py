@@ -16,7 +16,6 @@ setuptools.setup(
         "License :: OSI Approved :: GPLv3",
         "Operating System :: OS Independent",
     ],
-    package_dir={"": "ooinet"},
-    packages=setuptools.find_packages(where="ooinet"),
+    packages=setuptools.find_packages(),
     python_requires=">=3.9.7"
 )
