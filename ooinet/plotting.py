@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 # +
@@ -61,8 +62,6 @@ def plot_variable(ds, param, add_deployments=True):
     
     return fig, ax
 
-
-# -
 
 def plot_gross_range(ds, param, gross_range):
     """Plot the data with the associated climatology values.
