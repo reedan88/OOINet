@@ -1,4 +1,5 @@
 import re
+import numpy as np
 import pandas as pd
 from ooinet import haversine as hs
 
@@ -124,6 +125,77 @@ def not_statistically_sigificant(x):
         if "<" in x:
             x = 0
     return x
+
+
+def clean_data(bottleData):
+    """
+    Process, clean, and convert the OOI Discrete Sampling summary sheets.
+    
+    This function takes the Discrete Sample summary sheets provided by OOI
+    and cleans up the spreadsheets, converts data types to be more useable,
+    and intrepts the bit flag-maps into QARTOD-type flags.
+    
+    Parameters
+    ----------
+    bottleData: (pandas.DataFrame)
+        A dataframe containing the loaded OOI Discrete Sampling summary data.
+        
+    Returns
+    -------
+    bottleData: (pandas.DataFrame)
+        The discrete sampling data cleaned up and standardized.
+    """
+    # Replace -9999999 with NaNs
+    bottleData = bottleData.replace(to_replace="-9999999", value=np.nan)
+    bottleData = bottleData.replace(to_replace=-9999999, value=np.nan)
+    
+    # Convert times from strings to pandas datetime objects
+    bottleData["Start Time [UTC]"] = bottleData["Start Time [UTC]"].apply(lambda x: convert_times(x))
+    bottleData["CTD Bottle Closure Time [UTC]"] = bottleData["CTD Bottle Closure Time [UTC]"].apply(lambda x: convert_times(x))
+
+    # Convert any values with a "<", which indicates a value not statistically significant from zero, with zero
+    bottleData = bottleData.applymap(not_statistically_sigificant)
+    
+    # Interpret the quality flags to QARTOD flag values
+    for col in bottleData.columns:
+        if "Flag" in col:
+            if "CTD" in col and "File" not in col:
+                bottleData[col] = bottleData[col].apply(lambda x: interp_ctd_flag(x))
+            elif "Discrete" in col:
+                bottleData[col] = bottleData[col].apply(lambda x: interp_discrete_flag(x))
+            elif "Replicate" in col:
+                bottleData[col] = bottleData[col].apply(lambda x: interp_replicate_flag(x))
+            elif "Niskin" in col:
+                bottleData[col] = bottleData[col].apply(lambda x: interp_niskin_flag(x))
+            else:
+                pass
+            
+    return bottleData
+
+
+def convert_oxygen(bottleData):
+    """Convert oxygen from ml/l to umol/kg"""
+    oxy = bottleData["Discrete Oxygen [mL/L]"]
+    
+    # Get relevant parameters
+    SP = bottleData[["CTD Salinity 1 [psu]", "CTD Salinity 2 [psu]"]].mean(axis=1)
+    T = bottleData[["CTD Temperature 1 [deg C]", "CTD Temperature 2 [deg C]"]].mean(axis=1)
+    P = bottleData["CTD Pressure [db]"]
+    LON = bottleData["Start Longitude [degrees]"]
+    LAT = bottleData["Start Latitude [degrees]"]
+    
+    # Calculate absolute salinity & conservative temperature
+    SA = gsw.SA_from_SP(SP, P, LON, LAT)
+    CT = gsw.CT_from_t(SA, T, P)
+    
+    # Calculate Density
+    RHO = gsw.rho(SA, CT, P)
+    
+    # Now convert from ml/l to umol/kg
+    mvO2 = 22.392*1000 # ml/mole O2
+    mole = (oxy/mvO2)*(1000/1)*(1/RHO)*1e6
+    
+    return mole
 
 
 def findNearest(bottleData, buoyLoc, maxDist):
