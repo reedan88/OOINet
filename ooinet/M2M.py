@@ -88,17 +88,19 @@ def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
 
     else:
         endpoints = get_api(search_url)
+        
+        if endpoints is not None:
+            
+            while len(endpoints) > 0:
 
-        while len(endpoints) > 0:
+                # Get one endpoint
+                new_endpoint = endpoints.pop()
 
-            # Get one endpoint
-            new_endpoint = endpoints.pop()
+                # Build the new request url
+                new_search_url = "/".join((search_url, new_endpoint))
 
-            # Build the new request url
-            new_search_url = "/".join((search_url, new_endpoint))
-
-            # Get the datasets for the new given endpoint
-            datasets = get_datasets(new_search_url, datasets)
+                # Get the datasets for the new given endpoint
+                datasets = get_datasets(new_search_url, datasets)
 
     # Once recursion is done, return the datasets
     return datasets
@@ -778,20 +780,10 @@ def download_netCDF_files(catalog, goldCopy=False, saveDir=None, verbose=True):
     queue.join()
 
 
-def clean_catalog(catalog, stream, deployments):
+def clean_catalog(catalog, stream, deployments=None):
     """Clean up the THREDDS catalog of unwanted datasets"""
-    # Parse the netCDF datasets to only get those with the datastream in its name
-    datasets = []
-    for dset in catalog:
-        check = dset.split("/")[-1]
-        if stream in check:
-            datasets.append(dset)
-        else:
-            pass
-    
     # Next, check that the netCDF datasets are not empty by getting the timestamps in the
     # datasets and checking if they are 
-    catalog = datasets
     datasets = []
     for dset in catalog:
         # Get the timestamps
@@ -803,26 +795,36 @@ def clean_catalog(catalog, stream, deployments):
         else:
             datasets.append(dset)
             
-    # Next, determine if the dataset is either for the given instrument
+    # Next, check if you want to filter for certain deployments
+    if deployments is not None:
+        catalog = datasets
+        datasets = []
+        for dset in catalog:
+            dep = re.findall("deployment[\d]{4}", dset)[0]
+            depNum = int(dep[-4:])
+            if depNum not in deployments:
+                pass
+            else:
+                datasets.append(dset)        
+        
+    # Finally, determine if the dataset is either for the given instrument
     # or an ancillary instrument which supplies and input variable
     catalog = datasets
     datasets = []
     ancillary = []
     for dset in catalog:
-        if re.search(stream, dset.split("/")[-1]) is None:
+        check = dset.split("/")[-1]
+        if stream in check:
+            datasets.append(dset)
+        else:
             ancillary.append(dset)
-        else:
-            datasets.append(dset)
-            
-    # Finally, check that deployment numbers match what is in deployments metadata
-    catalog = datasets
-    datasets = []
-    for dset in catalog:
-        dep = re.findall("deployment[\d]{4}", dset)[0]
-        depNum = int(dep[-4:])
-        if depNum not in list(deployments["deploymentNumber"]):
-            pass
-        else:
-            datasets.append(dset)
-            
-    return datasets
+                       
+    return datasets, ancillary
+
+
+def get_netCDF_files(refdes, method, stream, goldCopy=True, *kwargs):
+    """
+    Gets the netCDF files for a given reference designator, method, and stream
+    """
+    
+    thredds_url = M2M.get_thredds_url(refdes, method, stream, goldCopy=goldCopy)
