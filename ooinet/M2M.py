@@ -78,29 +78,34 @@ def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
         deployments = get_api(deploy_url)
 
         # Put the data into a dictionary
-        info = pd.DataFrame(data=np.array([[array, node, instrument,
-                                            refdes, search_url, deployments
-                                            ]]),
-                            columns=["array", "node", "instrument",
-                                     "refdes", "url", "deployments"])
+        info = {
+            "array": array,
+            "node": node,
+            "instrument": instrument,
+            "refdes": refdes,
+            "url": search_url,
+            "deployments": [deployments],
+        }
+        
+        # Convert it to a dataframe
+        info_df = pd.DataFrame(info)
+        
         # add the dictionary to the dataframe
-        datasets = datasets.append(info, ignore_index=True)
+        datasets = datasets.append(info_df, ignore_index=True)
 
     else:
         endpoints = get_api(search_url)
-        
-        if endpoints is not None:
-            
-            while len(endpoints) > 0:
+                   
+        while len(endpoints) > 0:
 
-                # Get one endpoint
-                new_endpoint = endpoints.pop()
+            # Get one endpoint
+            new_endpoint = endpoints.pop()
 
-                # Build the new request url
-                new_search_url = "/".join((search_url, new_endpoint))
+            # Build the new request url
+            new_search_url = "/".join((search_url, new_endpoint))
 
-                # Get the datasets for the new given endpoint
-                datasets = get_datasets(new_search_url, datasets)
+            # Get the datasets for the new given endpoint
+            datasets = get_datasets(new_search_url, datasets)
 
     # Once recursion is done, return the datasets
     return datasets
@@ -820,11 +825,3 @@ def clean_catalog(catalog, stream, deployments=None):
             ancillary.append(dset)
                        
     return datasets, ancillary
-
-
-def get_netCDF_files(refdes, method, stream, goldCopy=True, *kwargs):
-    """
-    Gets the netCDF files for a given reference designator, method, and stream
-    """
-    
-    thredds_url = M2M.get_thredds_url(refdes, method, stream, goldCopy=goldCopy)
