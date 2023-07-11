@@ -802,7 +802,8 @@ def clean_catalog(catalog, stream, deployments=None):
             
     # Next, check if you want to filter for certain deployments
     if deployments is not None:
-        catalog = datasets
+        # Check that the deployments are a list
+        deployments = list(deployments["deploymentNumber"].astype(int))
         datasets = []
         for dset in catalog:
             dep = re.findall("deployment[\d]{4}", dset)[0]
