@@ -162,5 +162,138 @@ class METBK:
         # Adjust for wind directionsthat are outside 0-360
         df['WIND_DIRECTION'] = df["WIND_DIRECTION"].apply(
                         lambda x: x+360 if x < 0 else x)
+        
 
-        return df
+        # Save the data into a new data structure
+        self.DATAFRAME = df
+    
+    
+class WAVSS():
+    
+    def __init__(self):
+        
+        self.DATA = {
+            'TIMESTAMP': [],
+            'INSTRUMENT_DATE': [],
+            'INSTRUMENT_TIME': [],
+            'INSTRUMENT_SERIAL': [],
+            'BUOY_ID': [],
+            'LATITUDE': [],
+            'LONGITUDE': [],
+            'N_ZERO_CROSSINGS': [],
+            'AVERAGE_WAVE_HEIGHT': [],
+            'MEAN_SPECTRAL_PERIOD': [],
+            'MAXIMUM_WAVE_HEIGHT': [],
+            'SIGNIFICANT_WAVE_HEIGHT': [],
+            'SIGNIFICANT_PERIOD': [],
+            'AVERAGE_HEIGHT_10TH_HIGHEST': [],
+            'AVERAGE_PERIOD_10TH_HIGHEST': [],
+            'MEAN_WAVE_PERIOD': [],
+            'PEAK_PERIOD': [],
+            'TP5': [],
+            'HMO': [],
+            'MEAN_DIRECTION': [],
+            'MEAN_SPREAD': []
+        }
+        
+        self.DATA_INDEX = {
+            'TIMESTAMP': 0,
+            'INSTRUMENT_DATE': 2,
+            'INSTRUMENT_TIME': 3,
+            'INSTRUMENT_SERIAL': 4,
+            'BUOY_ID': 5,
+            'LATITUDE': 6,
+            'LONGITUDE': 7,
+            'N_ZERO_CROSSINGS': 8,
+            'AVERAGE_WAVE_HEIGHT': 9,
+            'MEAN_SPECTRAL_PERIOD': 10,
+            'MAXIMUM_WAVE_HEIGHT': 11,
+            'SIGNIFICANT_WAVE_HEIGHT': 12,
+            'SIGNIFICANT_PERIOD': 13,
+            'AVERAGE_HEIGHT_10TH_HIGHEST': 14,
+            'AVERAGE_PERIOD_10TH_HIGHEST': 15,
+            'MEAN_WAVE_PERIOD': 16,
+            'PEAK_PERIOD': 17,
+            'TP5': 18,
+            'HMO': 19,
+            'MEAN_DIRECTION': 20,
+            'MEAN_SPREAD': 21
+        }
+        
+        
+    
+    def parse_data(self, raw_data):
+        """
+        Parse the raw_data into the different measurements
+        
+        Parameters
+        ----------
+        raw_data: str
+            A string of each line of data from the instrument raw data file
+            
+        Returns
+        -------
+        self.DATA: dict
+            A dictionary of the parsed raw data stored into the applicable
+            measurements
+            
+        """
+        for line in raw_data:
+            
+            # Check that its a wave_statistics measurement
+            if '$TSPWA' not in line:
+                continue
+
+            # Dump everything after the "*"
+            line = re.sub(r'\*.*', '', line, flags=re.DOTALL)
+
+            # Split the data
+            line = re.split(r' \$|,', line)
+
+            # Check that it is a full data record. If not, return none
+            if len(line) != 22:
+                continue
+
+            # Parse the raw data into the data dictionary based on index
+            for key in self.DATA_INDEX.keys():
+                # Get the index of a particular measurement
+                index = self.DATA_INDEX.get(key)
+
+                # Put the parsed raw data into the data dictionary
+                self.DATA[key].append(line[index])
+                
+                
+    def process_data(self):
+        """
+        Process the parsed WAVSS data into a dataframe resampled to 10-minute avg
+
+        This function takes in the parsed WAVSS data, converts it to a dataframe,
+        indexes via time, converts data types from strings, and then resamples
+        the data into 10 minute averages. 
+
+        Parameters
+        ----------
+        self.DATA: dict
+            The parsed METBK data stored in a dictionary
+
+        Returns
+        -------
+        self.DATAFRAME: pandas.DataFrame
+            A pandas DataFrame with the METBK data with the METBK_DATA dict keys as
+            column headers, indexed by time, resampled to 10-minute averages, and 
+            the derived variables.
+        """
+        # First, stick it into a dataframe
+        df = pd.DataFrame(self.DATA)
+        df.drop(columns=["BUOY_ID", "LATITUDE", "LONGITUDE"], inplace=True)
+
+        # Next, convert types
+        df["TIMESTAMP"] = df["TIMESTAMP"].apply(lambda x: pd.to_datetime(x))
+        df.set_index(keys=["TIMESTAMP"], inplace=True)
+        df = df.applymap(float)
+
+        # Bin into 10-minute increments
+        df = df.resample('10T').mean()
+
+        # Save the results to a dataframe
+        self.DATAFRAME = df
