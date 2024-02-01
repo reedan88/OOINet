@@ -91,7 +91,7 @@ def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
         info_df = pd.DataFrame(info)
         
         # add the dictionary to the dataframe
-        datasets = datasets.append(info_df, ignore_index=True)
+        datasets = pd.concat([datasets, info_df])
 
     else:
         endpoints = get_api(search_url)
@@ -230,7 +230,7 @@ def get_vocab(refdes):
 
     # Put the returned vocab data into a pandas dataframe
     vocab = pd.DataFrame()
-    vocab = vocab.append(data)
+    vocab = pd.concat([vocab, pd.DataFrame(data)])
 
     # Finally, return the results
     return vocab
@@ -444,7 +444,7 @@ def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
         df = pd.DataFrame(data=data, columns=columns)
 
         # Generate the table results
-        results = results.append(df)
+        results = pd.concat([results, df])
 
     # Sort the deployments by deployment number and reset the index
     results = results.sort_values(by="deploymentNumber")
@@ -468,11 +468,12 @@ def get_datastreams(refdes):
                 continue
             stream_url = "/".join((method_url, method))
             streams = get_api(stream_url)
-            stream_df = stream_df.append({
+            new_dict = {
                 "refdes": refdes,
                 "method": method,
-                "stream": streams
-            }, ignore_index=True)
+                "stream": streams,
+            }
+            stream_df = pd.concat([stream_df, pd.DataFrame(new_dict)])
 
         # Expand so that each row of the dataframe is unique
         stream_df = stream_df.explode('stream').reset_index(drop=True)
