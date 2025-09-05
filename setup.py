@@ -1,6 +1,6 @@
 import setuptools
 
-with open(README.md", "r", encoding="utf-8") as fh:
+with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setuptools.setup(
@@ -8,7 +8,7 @@ setuptools.setup(
     version="0.0.1a",
     author="Andrew Reed",
     authoer_email="areed@whoi.edu",
-    descriptio"="A package for interacting with the Ocean Observatories Initiative (OOI) Machine-2-Machine (M2M) API.",
+    description="A package for interacting with the Ocean Observatories Initiative (OOI) Machine-2-Machine (M2M) API.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     classifiers=[
