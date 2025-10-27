@@ -449,9 +449,12 @@ def get_deployments(refdes: str, deploy_num: str = "-1") -> pd.DataFrame:
         stopTime = convert_time(deployment.get("eventStopTime"))
 
         # Cruise IDs of the deployment and recover cruises
-        deployCruiseInfo = deployment.get("deployCruiseInfo") if deployCruiseInfo else None
-        recoverCruiseInfo = deployment.get("recoverCruiseInfo") if recoverCruiseInfo else None
+        deployCruiseInfo = deployment.get("deployCruiseInfo")
+        deployID = deployCruiseInfo.get("uniqueCruiseIdentifier") if deployCruiseInfo else None
         
+        recoverCruiseInfo = deployment.get("recoverCruiseInfo")
+        recoverID = recoverCruiseInfo.get("uniqueCruiseIdentifier") if recoverCruiseInfo else None
+
         # Put the data into a dictionary
         rows.append({
             "deploymentNumber": deploymentNumber,
@@ -540,10 +543,8 @@ def parse_metadata(metadata: Dict) -> pd.DataFrame:
     if metadata_times.empty and metadata_parameters.empty:
         results = None
     else:
-        
-    results = metadata_parameters.merge(metadata_times, left_on="stream",
-                                        right_on="stream")
-    results.drop_duplicates(inplace=True)
+        results = metadata_parameters.merge(metadata_times, left_on="stream", right_on="stream")
+        results.drop_duplicates(inplace=True)
 
     # Return the results
     return results
@@ -932,14 +933,14 @@ def clean_catalog(catalog, stream, deployments=None):
     # Next, check that the netCDF datasets are not empty by getting the timestamps in the
     # datasets and remove datasets with identical t1 == t2 timestamps (empty) 
     valid_datasets = []
-        try:
-            timestamps = dset.split("_")[-1].replace(".nc", "").split("-")
-            t1, t2 = timestamps[0], timestamps[-1]
-            if t1 != t2:
-                valid_datasets.append(dset)
-        except Exception:
-            # if pattern unexpected, keep the dataset (safer)
+    try:
+        timestamps = dset.split("_")[-1].replace(".nc", "").split("-")
+        t1, t2 = timestamps[0], timestamps[-1]
+        if t1 != t2:
             valid_datasets.append(dset)
+    except Exception:
+        # if pattern unexpected, keep the dataset (safer)
+        valid_datasets.append(dset)
             
     # Next, check if you want to filter for certain deployments
     if deployments is not None:
