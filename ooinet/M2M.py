@@ -4,25 +4,33 @@ import time
 import netrc
 import requests
 import datetime
+import logging
 import numpy as np
 import pandas as pd
 import xarray as xr
 from queue import Queue
 from bs4 import BeautifulSoup
 from urllib.request import urlretrieve
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple, Any
 
-# Import shared utilies
+# Import shared utilies (kept exactly as requested)
 from ooinet.utils import ntp_seconds_to_datetime, convert_time, unix_epoch_time
 from ooinet.Download import setup_download_dir, download_file, DownloadWorker
+
+# configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize credentials
 try:
     nrc = netrc.netrc()
     AUTH = nrc.authenticators('ooinet.oceanobservatories.org')
-    login, password = AUTH[0], AUTH[2]
     if AUTH is None:
         raise RuntimeError(
-            'No entry found for machine ``ooinet.oceanobservatories.org`` in the .netrc file')
+            'No entry found for machine ``ooinet.oceanobservatories.org`` in the .netrc file'
+        )
+    login, _, password = AUTH  # keep original order but only use login/password
 except FileNotFoundError as e:
     raise OSError(e, os.strerror(e.errno), os.path.expanduser('~'))
 
@@ -35,7 +43,7 @@ URLS = {
     'deploy': 'https://ooinet.oceanobservatories.org/api/m2m/12587/events/deployment/inv',
     'preload': 'https://ooinet.oceanobservatories.org/api/m2m/12575/parameter',
     'cal': 'https://ooinet.oceanobservatories.org/api/m2m/12587/asset/cal',
-    'fileServer':"https://opendap.oceanobservatories.org/thredds/fileServer/",
+    'fileServer': "https://opendap.oceanobservatories.org/thredds/fileServer/",
     'dodsC': "https://opendap.oceanobservatories.org/thredds/dodsC/",
     "goldCopy": "https://thredds.dataexplorer.oceanobservatories.org/thredds/catalog/ooigoldcopy/public/",
     "goldCopy_fileServer": "https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/",
@@ -46,25 +54,67 @@ URLS = {
 SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(max_retries=0)
 SESSION.mount("https://", adapter)
+DEFAULT_TIMEOUT = 10  # seconds
 
 
-def get_api(url, params=None):
-    """Function which gets OOINet API endpoint"""
-    r = SESSION.get(url, params=params, auth=(login, password))
-    if r.status_code == requests.codes.ok:
-        api = r.json()
-    else:
-        print(r.reason)
-        api = None
-    return api
+def get_api(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = DEFAULT_TIMEOUT) -> Optional[Dict]:
+    """
+    Perform an authenticated GET request to the OOINet API and return parsed JSON.
+
+    Parameters
+    ----------
+    url : str
+        The URL to request.
+    params : dict or None, optional
+        Querystring parameters to include in the request.
+    timeout : int, optional
+        Request timeout in seconds.
+
+    Returns
+    -------
+    dict or None
+        Parsed JSON response if status_code == 200, otherwise None.
+
+    Raises
+    ------
+    requests.RequestException
+        Re-raises network-related exceptions after logging.
+    """
+    try:
+        r = SESSION.get(url, params=params, auth=(login, password), timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError as e:
+        logger.error("HTTP error requesting %s: %s", url, e)
+    except requests.RequestException as e:
+        logger.error("Network error requesting %s: %s", url, e)
+        raise
+    except ValueError as e:
+        logger.error("JSON decode error for %s: %s", url, e)
+    return None
 
 
-def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
-    """Search OOINet for available datasets for a url."""
+def get_datasets(search_url: str, datasets: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """
+    Recursively walk an OOINet endpoint (ending with 'inv') and build a dataframe of datasets.
+
+    Parameters
+    ----------
+    search_url : str
+        Endpoint to start walking; expected to be an OOINet 'inv' endpoint or a subtree.
+    datasets : pandas.DataFrame or None, optional
+        DataFrame to append results to. If None, an empty DataFrame will be used.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with discovered datasets. Columns include array, node, instrument, refdes, url, deployments.
+    """
+    if datasets is None:
+        datasets = pd.DataFrame()
+    
     # Check if the method is attached to the url
-    flag = ("inv" == search_url.split("/")[-4])
-    # inst = re.search("[0-9]{2}-[023A-Z]{6}[0-9]{3}", search_url)
-    # inst = re.search("[0-9]{2}-", search_url)
+    flag = ("inv" == search_url.split("/")[-4]) if len(search_url.split("/")) >= 4 else False
 
     # This means you are at the end-point
     if flag is True:
@@ -73,9 +123,8 @@ def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
         refdes = "-".join((array, node, instrument))
 
         # Get the available deployments
-        deploy_url = "/".join((URLS["deploy"], array, node,
-                               instrument))
-        deployments = get_api(deploy_url)
+        deploy_url = "/".join((URLS["deploy"], array, node, instrument))
+        deployments = get_api(deploy_url) or []
 
         # Put the data into a dictionary
         info = {
@@ -91,135 +140,104 @@ def get_datasets(search_url, datasets=pd.DataFrame(), **kwargs):
         info_df = pd.DataFrame(info)
         
         # add the dictionary to the dataframe
-        datasets = pd.concat([datasets, info_df])
+        datasets = pd.concat([datasets, info_df], ignore_index=True)
 
     else:
         endpoints = get_api(search_url)
-                   
-        while len(endpoints) > 0:
-
-            # Get one endpoint
+        
+        # endpoints expected to be a list of endpoint names
+        while endpoints:
             new_endpoint = endpoints.pop()
-
-            # Build the new request url
             new_search_url = "/".join((search_url, new_endpoint))
-
-            # Get the datasets for the new given endpoint
-            datasets = get_datasets(new_search_url, datasets)
+            datasets = get_datasets(new_search_url, datasets=datasets)
 
     # Once recursion is done, return the datasets
     return datasets
 
 
-def search_datasets(array=None, node=None, instrument=None,
-                    English_names=False):
-    """Search OOINet for datasets.
+def search_datasets(array: Optional[str] = None, node: Optional[str] = None,
+                    instrument: Optional[str] = None, English_names: bool = False) -> pd.DataFrame:
+    """
+    Search OOINet for datasets matching given array/node/instrument.
 
     Parameters
     ----------
-    array: (str)
-        OOI abbreviation for a particular buoy on an array (e.g. Pioneer
-        Central Surface Mooring = CP01CNSM)
-    node: (str)
-        Partial or full OOI abbreviation for a node on a buoy to search for
-        (e.g. Multi-Function Node = MFD)
-    instrument: (str)
-        Partial or full OOI abbreviation for a particular instrument type
-        to search for (e.g. CTD)
-    English_names: (bool)
-        Set to True if the descriptive names associated with the given
-        array/node/instrument are wanted.
+    array : str or None
+        OOI array abbreviation, or None to search all.
+    node : str or None
+        Partial or full node abbreviation to filter.
+    instrument : str or None
+        Partial or full instrument abbreviation to filter.
+    English_names : bool, optional
+        If True, include human-readable names (via get_vocab).
 
     Returns
     -------
-    datasets: (pandas.DataFrame)
-        A dataframe of all the OOI datasets which match the given search
-        terms. If no search terms are entered, will return every dataset
-        available in OOINet (slow).
+    pandas.DataFrame
+        DataFrame of matching datasets.
     """
-    # Build the request url
+    # Build the request url; if any piece is None, format will include 'None' so strip at first 'None'
     dataset_url = f'{URLS["data"]}/{array}/{node}/{instrument}'
+    
+    # Truncate at the first "None"
+    none_idx = dataset_url.find("None")
+    if none_idx != -1:
+        dataset_url = dataset_url[:none_idx - 1]
 
-    # Truncate the url at the first "none"
-    dataset_url = dataset_url[:dataset_url.find("None")-1]
-
-    print(f"Searching {dataset_url}")
-    # Get the datasets
+    # Display search to user
+    logger.info("Searching %s", dataset_url)
     datasets = get_datasets(dataset_url)
 
-    # Now, it node is not None, can filter on that
-    if node is not None:
-        mask = datasets["node"].apply(lambda x: True if node
-                                      in x else False)
-        datasets = datasets[mask]
+    # filter by node/instrument if provided
+    if node is not None and not datasets.empty:
+        datasets = datasets[datasets["node"].str.contains(node, na=False)]
 
-    # If instrument is not None
-    if instrument is not None:
-        mask = datasets["instrument"].apply(lambda x: True if instrument
-                                            in x else False)
-        datasets = datasets[mask]
+    if instrument is not None and not datasets.empty:
+        datasets = datasets[datasets["instrument"].str.contains(instrument, na=False)]
 
     # Check if they want the English names for the associated datasets
-    if English_names:
-        vocab = {
-            "refdes": [],
-            "array_name": [],
-            "node_name": [],
-            "instrument_name": []
-        }
-
-        # Iterate through the given reference designators
+    if English_names and not datasets.empty:
+        vocab_rows = []
         for refdes in datasets["refdes"]:
-            # Request the vocab for the given reference designator
             refdes_vocab = get_vocab(refdes)
-
-            # Check if it returns an empty dataframe - then fill with NaNs
-            if len(refdes_vocab) == 0:
-                vocab["refdes"].append(refdes)
-                vocab["array_name"].append("No record")
-                vocab["node_name"].append("No record")
-                vocab["instrument_name"].append("No record")
-
-            # If it isn't empty - Parse the refdes-specific vocab
+            if refdes_vocab is None or refdes_vocab.empty:
+                vocab_rows.append({
+                    "refdes": refdes,
+                    "array_name": "No record",
+                    "node_name": "No record",
+                    "instrument_name": "No record"
+                })
             else:
-                vocab["refdes"].append(refdes)
-                vocab["array_name"].append(
-                    refdes_vocab["tocL1"].iloc[0] + " " +
-                    refdes_vocab["tocL2"].iloc[0])
-                vocab["node_name"].append(refdes_vocab["tocL3"].iloc[0])
-                vocab["instrument_name"].append(
-                    refdes_vocab["instrument"].iloc[0])
-
-        # Merge the results with the datasets
-        vocab = pd.DataFrame(vocab)
-        datasets = datasets.merge(vocab, left_on="refdes",
-                                  right_on="refdes")
-        # Sort the datasets
+                vocab_rows.append({
+                    "refdes": refdes,
+                    "array_name": f'{refdes_vocab["tocL1"].iloc[0]} {refdes_vocab["tocL2"].iloc[0]}',
+                    "node_name": refdes_vocab["tocL3"].iloc[0],
+                    "instrument_name": refdes_vocab["instrument"].iloc[0]
+                })
+        vocab_df = pd.DataFrame(vocab_rows)
+        datasets = datasets.merge(vocab_df, on="refdes", how="left")
         columns = ["array", "array_name", "node", "node_name",
-                   "instrument", "instrument_name", "refdes", "url",
-                   "deployments"]
+                   "instrument", "instrument_name", "refdes", "url", "deployments"]
+        # keep only columns that exist
+        columns = [c for c in columns if c in datasets.columns]
         datasets = datasets[columns]
 
     return datasets
 
 
-def get_vocab(refdes):
-    """Get OOI vocabulary.
-
-    Return the OOI vocabulary for a given url endpoint. The vocab results
-    contains info about the reference designator, names of the
+def get_vocab(refdes: str) -> pd.DataFrame:
+    """
+    Return OOI vocabulary (human readable names) for a reference designator.
 
     Parameters
     ----------
-    refdes: (str)
-        The reference designator for the instrument for which to request
-        vocab information.
+    refdes : str
+        Reference designator in the form '<array>-<node>-<instrument>'.
 
     Returns
     -------
-    results: (pandas.DataFrame)
-        A table of the vocab information for the given reference
-        designator.
+    pandas.DataFrame
+        DataFrame of vocabulary information. Empty DataFrame if none.
     """
     # First, construct the vocab request url
     array, node, instrument = refdes.split("-", 2)
@@ -236,82 +254,95 @@ def get_vocab(refdes):
     return vocab
 
 
-def reformat_calInfo(calInfo, deployNum, uid):
-    """Internal method to reformat calibration info"""
-    calDataFrame = pd.DataFrame()
-    # Reformat the calibration info
-    for cal in calInfo["calibration"]:
-        for calData in cal["calData"]:
-            calDataFrame = calDataFrame.append({
-                "deploymentNumber": int(deployNum),
-                "uid": uid,
-                "calCoef": calData["eventName"],
-                "value": calData["value"],
-                "calFile": calData["dataSource"]
-            }, ignore_index=True)
-    return calDataFrame
-
-
-def get_calibrations_by_refdes(refdes, deployments):
-    """Get calibrations for deployments for a given reference designator.
-
-    Return the effective calibrations for a given reference designator
-    for all of the deployments.
+def reformat_calInfo(calInfo: Dict, deployNum: int, uid: str) -> pd.DataFrame:
+    """
+    Reformat calibration info JSON into a DataFrame.
 
     Parameters
     ----------
-    refdes: (str)
-        The reference designator for the instrument for which to request
-        vocab information.
-    deployments: (pandas.DataFrame)
-        A dataframe with the given deployments for a reference designator
-        as returned by the get_deployments method.
+    calInfo : dict
+        JSON structure returned by calibration API.
+    deployNum : int
+        Deployment number to annotate each row.
+    uid : str
+        Asset UID.
 
     Returns
     -------
-    calibrations: (pandas.DataFrame)
-        A table of the calibration information for the given reference
-        designator for all of the deployments specified by the
-        deployments dataframe.
+    pandas.DataFrame
+        DataFrame with columns: deploymentNumber, uid, calCoef, value, calFile
     """
+    rows = []
+    for cal in calInfo.get("calibration", []):
+        for calData in cal.get("calData", []):
+            rows.append({
+                "deploymentNumber": int(deployNum),
+                "uid": uid,
+                "calCoef": calData.get("eventName"),
+                "value": calData.get("value"),
+                "calFile": calData.get("dataSource")
+            })
+    return pd.DataFrame(rows)
+
+
+def get_calibrations_by_refdes(refdes: str, deployments: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Get calibration coefficients for all deployments of a reference designator.
+
+    Parameters
+    ----------
+    refdes : str
+        Reference designator in the form '<array>-<node>-<instrument>'.
+    deployments : pandas.DataFrame
+        Deployments DataFrame as returned by get_deployments().
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Combined calibrations across deployments or None if none found.
+    """
+    
     # Create a dask delayed object to gather the calibrations for the
     # instrument from each deployment
-    cals = []
-    for ind, row in deployments.iterrows():
+    cals_list = []
+    for _, row in deployments.iterrows():
 
         # Get the relevant request data
-        deployNum, uid, deployStart, deployEnd = row["deploymentNumber"], row["uid"], row["deployStart"], row["deployEnd"]
-
-        # Reformat the deployStart and deployEnd
-        if pd.isna(deployEnd):
-            deployEnd = datetime.datetime.now()
+        deployNum = row.get("deploymentNumber")
+        uid = row.get("uid")
+        deployStart = row.get("deployStart")
+        deployEnd = row.get("deployEnd") or datetime.datetime.now()
 
         # Construct the request parameters
         params = {
             "refdes": refdes,
             "uid": uid,
-            "beginDT": deployStart.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "endDT": deployEnd.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            "beginDT": pd.to_datetime(deployStart).strftime("%Y-%m-%dT%H:%M:%S.000Z") if deployStart is not None else None,
+            "endDT": pd.to_datetime(deployEnd).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         }
 
+        # Remove None parameters
+        params = {k: v for k, v in params.items() if v is not None}
+
         # Request the data
-        calInfo = get_api(URLS["cal"], params)
-
-        # Reformat the data
-        calDataFrame =  reformat_calInfo(calInfo, deployNum, uid)
-
-        cals.append(calDataFrame)
+        calInfo = get_api(URLS["cal"], params) or {}
+        if calInfo:
+            df = reformat_calInfo(calInfo, deployNum, uid)
+            if not df.empty:
+                cals_list.append(df)
 
     # Append individual calibrations into a single dataframe
-    calibrations = pd.DataFrame()
-    for cal in cals:
-        calibrations = calibrations.append(cal, ignore_index=True)
-
+    if not cals_list:
+        calibrations = None
+    else:
+        calibrations = pd.concat(cals_list, ignore_index=True)
+    
     return calibrations
 
 
-def get_calibrations_by_uid(uid, params=None):
-    """Get calibrations for a specific instrument by its UID.
+def get_calibrations_by_uid(uid: str, params: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """
+    Get calibrations for a specific instrument by its UID.
 
     Return the calibration coefficients for a given instrument
     in OOI for all of its deployments by its UID. The instrument
@@ -320,7 +351,7 @@ def get_calibrations_by_uid(uid, params=None):
 
     Parameters
     ----------
-    uid: (str)
+    uid: str
         The unique id (UID) for the instrument for which to request
         vocab information.
     params: (dict), optional
@@ -331,39 +362,40 @@ def get_calibrations_by_uid(uid, params=None):
 
     Returns
     -------
-    calibrations: (pandas.DataFrame)
-        A table of the calibration information for the given instrument.
+    pandas.DataFrame
+        DataFrame with columns uid, calCoef, calDate, value, calFile sorted by calDate and calCoef.
     """
-
     cal_url = URLS["cal"]
-    if params is None:
-        params = {
-            "uid":uid
-        }
-    else:
-        params["uid"] = uid
+    query = dict(params) if params else {}
+    query["uid"] = uid
 
     # Make the calibration data request
-    calInfo = get_api(cal_url, params=params)
+    calInfo = get_api(cal_url, params=query) or {}
 
     # Put the data into a pandas dataframe, sorted by calibration date and coefficient name
-    columns = ["uid", "calCoef", "calDate", "value", "calFile"]
-    calibrations = pd.DataFrame(columns=columns)
-    for c in calInfo["calibration"]:
-        for cc in c["calData"]:
-            calibrations = calibrations.append({
-                "uid": cc["assetUid"],
-                "calCoef": cc["eventName"],
-                "calDate": convert_time(cc["eventStartTime"]),
-                "value": cc["value"],
-                "calFile": cc["dataSource"]
-            }, ignore_index=True)
-    calibrations.sort_values(by=["calDate", "calCoef"], inplace=True)
+    rows = []
+    for c in calInfo.get("calibration", []):
+        for cc in c.get("calData", []):
+            rows.append({
+                "uid": cc.get("assetUid"),
+                "calCoef": cc.get("eventName"),
+                "calDate": convert_time(cc.get("eventStartTime")),
+                "value": cc.get("value"),
+                "calFile": cc.get("dataSource")
+            })
+    if not rows:
+        calibrations = pd.DataFrame(columns=["uid", "calCoef", "calDate", "value", "calFile"])
+    else:
+        calibrations = pd.DataFrame(rows)
+        calibrations.sort_values(by=["calDate", "calCoef"], inplace=True)
+        calibrations.reset_index(drop=True, inplace=True)
 
     return calibrations
 
-def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
-    """Request deployment information for a reference designator.
+
+def get_deployments(refdes: str, deploy_num: str = "-1") -> pd.DataFrame:
+    """
+    Request deployment information for a reference designator.
 
     Get the deployment information for an instrument. Defaults to all
     deployments for a given instrument (reference designator) unless one is
@@ -371,19 +403,16 @@ def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
 
     Parameters
     ----------
-    refdes: (str)
+    refdes: str
         The reference designator for the instrument for which to request
         deployment information.
-    deploy_num: (str)
+    deploy_num: str, optional
         Optional to include a specific deployment number. Otherwise
         defaults to -1 which is all deployments.
-    results: (pandas.DataFrame)
-        Optional. Useful for recursive applications for gathering
-        deployment information for multiple instruments.
 
     Returns
     -------
-    results: (pandas.DataFrame)
+    pandas.DataFrame
         A table of the deployment information for the given instrument
         (reference designator) with deployment number, deployed water
         depth, latitude, longitude, start of deployment, end of deployment,
@@ -391,33 +420,29 @@ def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
     """
     # First, build the request
     array, node, instrument = refdes.split("-", 2)
-    deploy_url = "/".join((URLS["deploy"], array, node, instrument,
-                           deploy_num))
+    deploy_url = "/".join((URLS["deploy"], array, node, instrument, deploy_num))
 
     # Next, get the deployments from the deploy url. The API returns a list
     # of dictionary objects with the deployment data.
-    deployments = get_api(deploy_url)
+    deployments = get_api(deploy_url) or []
 
     # Now, iterate over the deployment list and get the associated data for
     # each individual deployment
-    while len(deployments) > 0:
-        # Get a single deployment
-        deployment = deployments.pop()
-
-        # Process the dictionary data
+    rows = []
+    for deployment in deployments:
         # Deployment Number
         deploymentNumber = deployment.get("deploymentNumber")
 
         # Location info
-        location = deployment.get("location")
+        location = deployment.get("location", {})
         depth = location["depth"]
         lat = location["latitude"]
         lon = location["longitude"]
 
         # Sensor info
-        sensor = deployment.get("sensor")
-        uid = sensor["uid"]
-        assetId = sensor["assetId"]
+        sensor = deployment.get("sensor", {})
+        uid = sensor.get("uid")
+        assetId = sensor.get("assetId")
 
         # Start and end times of the deployments
         startTime = convert_time(deployment.get("eventStartTime"))
@@ -425,84 +450,107 @@ def get_deployments(refdes, deploy_num="-1", results=pd.DataFrame()):
 
         # Cruise IDs of the deployment and recover cruises
         deployCruiseInfo = deployment.get("deployCruiseInfo")
+        deployID = deployCruiseInfo.get("uniqueCruiseIdentifier") if deployCruiseInfo else None
+        
         recoverCruiseInfo = deployment.get("recoverCruiseInfo")
-        if deployCruiseInfo is not None:
-            deployID = deployCruiseInfo["uniqueCruiseIdentifier"]
-        else:
-            deployID = None
-        if recoverCruiseInfo is not None:
-            recoverID = recoverCruiseInfo["uniqueCruiseIdentifier"]
-        else:
-            recoverID = None
+        recoverID = recoverCruiseInfo.get("uniqueCruiseIdentifier") if recoverCruiseInfo else None
 
-        # Put the data into a pandas dataframe
-        data = np.array([[deploymentNumber, uid, assetId, lat, lon, depth,
-                          startTime, stopTime, deployID, recoverID]])
-        columns = ["deploymentNumber", "uid", "assetId",  "latitude",
-                   "longitude", "depth", "deployStart", "deployEnd",
-                   "deployCruise", "recoverCruise"]
-        df = pd.DataFrame(data=data, columns=columns)
+        # Put the data into a dictionary
+        rows.append({
+            "deploymentNumber": deploymentNumber,
+            "uid": uid,
+            "assetId": assetId,
+            "latitude": lat,
+            "longitude": lon,
+            "depth": depth,
+            "deployStart": startTime,
+            "deployEnd": stopTime,
+            "deployCruise": deployID,
+            "recoverCruise": recoverID
+        })
 
-        # Generate the table results
-        results = pd.concat([results, df])
-
-    # Sort the deployments by deployment number and reset the index
-    results = results.sort_values(by="deploymentNumber")
-    results = results.reset_index(drop=True)
+    # Generate the results table
+    if not rows:
+        results = pd.DataFrame(columns=["deploymentNumber", "uid", "assetId", "latitude", "longitude",
+                                        "depth", "deployStart", "deployEnd", "deployCruise", "recoverCruise"])
+    else:
+        results = pd.DataFrame(rows)
+        # Sort the deployments by deployment number and reset the index
+        results = results.sort_values(by="deploymentNumber")
+        results = results.reset_index(drop=True)
 
     return results
 
 
-def get_datastreams(refdes):
-        """Retrieve methods and data streams for a reference designator."""
-        # Build the url
-        array, node, instrument = refdes.split("-", 2)
-        method_url = "/".join((URLS["data"], array, node, instrument))
+def get_datastreams(refdes: str) -> pd.DataFrame:
+    """
+    Retrieve available methods and streams for a reference designator.
 
-        # Build a table linking the reference designators, methods, and data
-        # streams
+    Parameters
+    ----------
+    refdes : str
+        Reference designator '<array>-<node>-<instrument>'.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with columns refdes, method, stream (each stream is a single row).
+    """
+    # Build the url
+    array, node, instrument = refdes.split("-", 2)
+    method_url = "/".join((URLS["data"], array, node, instrument))
+    methods = get_api(method_url) or []
+
+    # Build a table linking the reference designators, methods, and data streams
+    rows = []
+    for method in methods:
+        if "bad" in method:
+            continue
+        stream_url = "/".join((method_url, method))
+        streams = get_api(stream_url) or []
+        for s in streams:
+            rows.append({"refdes": refdes, "method": method, "stream": s})
+
+    # Create the DataFrame table
+    if not rows:
         stream_df = pd.DataFrame(columns=["refdes", "method", "stream"])
-        methods = get_api(method_url)
-        for method in methods:
-            if "bad" in method:
-                continue
-            stream_url = "/".join((method_url, method))
-            streams = get_api(stream_url)
-            new_dict = {
-                "refdes": refdes,
-                "method": method,
-                "stream": streams,
-            }
-            stream_df = pd.concat([stream_df, pd.DataFrame(new_dict)])
+    else:
+        stream_df = pd.DataFrame(rows)
 
-        # Expand so that each row of the dataframe is unique
-        stream_df = stream_df.explode('stream').reset_index(drop=True)
-
-        # Return the results
-        return stream_df
+    return stream_df
 
 
 
-def parse_metadata(metadata):
-    """Parse metadata to dataframe.
+def parse_metadata(metadata: Dict) -> pd.DataFrame:
+    """
+    Parse metadata JSON for an instrument into a DataFrame.
 
-    Parse the metadata dictionary for an instrument returned by OOI into
-    a pandas dataframe.
+    Parameters
+    ----------
+    metadata : dict
+        JSON metadata as returned by the OOINet metadata endpoint.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame combining 'times' and 'parameters' keyed on 'stream'.
     """
     # Put the two keys into separate dataframes
-    metadata_times = pd.DataFrame(metadata["times"])
-    metadata_parameters = pd.DataFrame(metadata["parameters"])
+    metadata_times = pd.DataFrame(metadata.get("times", []))
+    metadata_parameters = pd.DataFrame(metadata.get("parameters", []))
 
     # Merge the two into a single dataframe
-    results = metadata_parameters.merge(metadata_times, left_on="stream",
-                                        right_on="stream")
-    results.drop_duplicates(inplace=True)
+    if metadata_times.empty and metadata_parameters.empty:
+        results = None
+    else:
+        results = metadata_parameters.merge(metadata_times, left_on="stream", right_on="stream")
+        results.drop_duplicates(inplace=True)
 
     # Return the results
     return results
 
 
-def get_metadata(refdes):
+def get_metadata(refdes: str) -> pd.DataFrame:
     """Request metadata.
 
     Get the OOI Metadata for a specific instrument specified by its
@@ -510,50 +558,49 @@ def get_metadata(refdes):
 
     Parameters
     ----------
-    refdes: (str)
+    refdes: str
         OOINet standardized reference designator in the form of
         <array>-<node>-<instrument>.
 
     Returns
     -------
-    results: (pandas.DataFrame)
+    pandas.DataFrame
         A dataframe with the relevant metadata of the given reference
         designator.
     """
     # First, construct the metadata request url
     array, node, instrument = refdes.split("-", 2)
-    metadata_request_url = "/".join((URLS["data"], array, node,
-                                     instrument, "metadata"))
+    metadata_request_url = "/".join((URLS["data"], array, node, instrument, "metadata"))
 
     # Request the metadata
-    metadata = get_api(metadata_request_url)
+    metadata = get_api(metadata_request_url) or {}
 
     # Parse the metadata
-    metadata = parse_metadata(metadata)
+    parsed = parse_metadata(metadata)
+    if parsed is None:
+        parsed = pd.DataFrame()
 
     # Add in the reference designator
-    metadata["refdes"] = refdes
+    parsed["refdes"] = refdes
 
     # Return the metadata
-    return metadata
+    return parsed
 
 
 def get_parameter_data_levels(metadata):
-    """Get parameters processing levels.
-
-    Get the data levels (processing level) associated with the parameters
-    for a given reference designator.
+    """
+    Determine processing/data levels for parameter IDs in metadata via the preload API.
 
     Parameters
     ----------
-    metadata: (pandas.DataFrame)
-        The dataframe of metadata returned by get_metadata which contains
+    metadata: pandas.DataFrame
+        The dataframe of metadata returned by get_metadata() which contains
         the metadata for a given reference designator.
 
     Returns
     -------
-    pid_dict: (dict)
-        A dictionary with the data levels for each parameter id (Pid)
+    dict
+        Mapping of pdId -> data_level (if available)
     """
     pdIds = np.unique(metadata["pdId"])
     pid_dict = {}
@@ -568,48 +615,112 @@ def get_parameter_data_levels(metadata):
 
     return pid_dict
 
+def filter_science_parameters(metadata: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter metadata to only science-level (processed) parameters.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        DataFrame returned by get_metadata.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Filtered metadata containing only science-level parameters.
+    """
+    if metadata is None or metadata.empty:
+        return pd.DataFrame()
+        
+    data_levels = get_parameter_data_levels(metadata)
+
+    def is_science(pdId):
+        level = data_levels.get(pdId)
+        return (level is not None) and (level > 0)
+
+    mask = metadata["pdId"].apply(is_science)
+    return metadata[mask]
+
+
+def science_parameters(metadata: pd.DataFrame, remove: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Group and return science-level parameters, optionally removing streams by keywords.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        The metadata DataFrame from get_metadata().
+    remove : list of str or None, optional
+        List of keywords used to filter out streams (case-insensitive substring matching).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Grouped DataFrame indexed by refdes, method, stream with unique values aggregated.
+    """
+    if metadata is None or metadata.empty:
+        return pd.DataFrame()
+
+    # Filter for only the metadata parameters associated with science-variables
+    science_vars = filter_science_parameters(metadata)
+    if remove:
+        # case-insensitive check against the 'particleKey' column (if present)
+        for keyword in remove:
+            keyword_low = keyword.lower()
+            if "particleKey" in science_vars.columns:
+                science_vars = science_vars[~science_vars["particleKey"].str.lower().str.contains(keyword_low, na=False)]
+            else:
+                # if particleKey doesn't exist, attempt to filter on stream names
+                science_vars = science_vars[~science_vars["stream"].str.lower().str.contains(keyword_low, na=False)]
+    
+    # Group the variables togther by the data stream
+    grouped = (science_vars.groupby(by=["refdes", "method", "stream"])
+               .agg(lambda x: pd.unique(x.values.ravel()).tolist())
+               .reset_index())
+    
+    # flatten single element lists
+    grouped = grouped.applymap(lambda x: x[0] if isinstance(x, list) and len(x) == 1 else x)
+    
+    return grouped
+
+    
 def get_annotations(refdes, **kwargs):
     """Retrieve data annotations for a given reference designator.
 
     Parameters
     ----------
-    refdes: (str)
+    refdes: str
         The reference designator which to query OOINet for the
         associated annotation data.
 
     Kwargs
     ------
-    method: (str)
+    method: str
         An OOINet method associated with the reference designator.
         Limits annotations for the given reference designator
         to only that method.
-    stream: (str)
+    stream: str
         An OOINet stream associated with the reference designator.
         Limits annotations for the given reference designator
         to only that stream.
-    beginDT: (str)
+    beginDT: str
         Limit the data request to only data after this date. Date
         should be formatted using OOINet epoch time (can be
         calculated using _)
-    endDT: (str)
+    endDT: str
         Limit the data request to only data before this date.
     """
     # Need to build a parameters dictionary to pass to requests
     params = {"refdes": refdes}
-    for key in kwargs:
-        val = kwargs.get(key)
-        # Convert datetimes to unix epoch
-        if key == "beginDT":
-            val = unix_epoch_time(val)
-        elif key == "endDT":
-            val = unix_epoch_time(val)
+    for key, val in kwargs.items():
+        if key in ("beginDT", "endDT"):
+            params[key] = unix_epoch_time(val)
         else:
-            pass
-        params.update({key: val})
+            params[key] = val
 
     # Get the annotations as a json and put into a dataframe
-    anno_data = get_api(URLS["anno"], params=params)
-    anno_data = pd.DataFrame(anno_data)
+    anno_data = get_api(URLS["anno"], params=params) or []
+    anno_ddf = pd.DataFrame(anno_data)
 
     # Convert the flags to QARTOD flags
     codes = {
@@ -622,45 +733,48 @@ def get_annotations(refdes, **kwargs):
         'not_available': 9,
         'pending_ingest': 9
     }
-    anno_data['qcFlag'] = anno_data['qcFlag'].map(codes).astype('category')
+    if not anno_df.empty and 'qcFlag' in anno_df.columns:
+        anno_df['qcFlag'] = anno_df['qcFlag'].map(codes).astype('category')
 
-    return anno_data
+    return anno_df
 
 
-def get_thredds_url(refdes, method, stream, goldCopy=False, **kwargs):
+def get_thredds_url(refdes: str, method: str, stream: str, goldCopy: bool = False,
+                    timeout_sec: int = 300, **kwargs) -> Optional[str]:
     """
-    Return the url for the THREDDS server for the desired dataset(s).
+    Return the THREDDS dataset URL for a given refdes/method/stream.
 
     Parameters
     ----------
-    refdes: (str)
-        Reference designator for the instrument
-    method: (str)
-        The method (i.e. telemetered) for the given reference designator
-    stream: (str)
-        The stream associated with the reference designator and method
-    goldCopy: (boolean: default False)
-        Determine if should request from ooinet or should utilize the
-        goldCopy THREDDS server.
+    refdes : str
+        Reference designator '<array>-<node>-<instrument>'.
+    method : str
+        Data method (e.g. 'telemetered').
+    stream : str
+        Stream name.
+    goldCopy : bool, optional
+        If True, return the goldCopy catalog URL (static).
+    timeout_sec : int, optional
+        Maximum seconds to wait for async dataset creation before raising.
 
     Kwargs
     ------
-    beginDT: (str)
+    beginDT: str or datetime-like
         Limit the data request to only data after this date.
-    endDT: (str)
+    endDT: str or datetime-like
         Limit the data request to only data before this date.
-    format: (str)
+    format: str
         e.g. "application/netcdf" (the default)
-    include_provenance (str):
+    include_provenance: str
         'true' returns a text file with the provenance information
-    include_annotations: (str)
+    include_annotations: str
         'true' returns a separate text file with annotations for the data
         within the given date range
 
     Returns
     -------
-    thredds_url: (str)
-        A url to the OOI Thredds server which contains the desired datasets
+    str or None
+        THREDDS URL when ready, otherwise None (or raises on network error).
     """
     # Build the data request url
     if goldCopy is True:
@@ -668,77 +782,87 @@ def get_thredds_url(refdes, method, stream, goldCopy=False, **kwargs):
         return goldCopy_url
     else:
         array, node, instrument = refdes.split("-", 2)
-        data_request_url = "/".join((URLS["data"], array, node,
-                                 instrument, method, stream))
+        data_request_url = "/".join((URLS["data"], array, node, instrument, method, stream))
 
     # Ensure proper datetime format for the request
-    if 'beginDT' in kwargs.keys():
-        kwargs['beginDT'] = pd.to_datetime(kwargs['beginDT']).strftime(
-            '%Y-%m-%dT%H:%M:%S.%fZ')
-    if 'endDT' in kwargs.keys():
-        kwargs['endDT'] = pd.to_datetime(kwargs['endDT']).strftime(
-            '%Y-%m-%dT%H:%M:%S.%fZ')
+    params = dict(kwargs)
+    for key in ("beginDT", "endDT"):
+        if key in params:
+            params[key] = pd.to_datetime(params[key]).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
-    # Build the query
-    if len(kwargs) == 0:
-        kwargs = {"require_deployment":True}
-    else:
-        kwargs.update({
-            "require_deployment":True
-        })
-    params = kwargs
+    # Ensure require_deployment included
+    params.setdefault("require_deployment", True)
 
     # Request the data
-    print("Waiting for request to process")
-    # Get the urls
-    urls = get_api(data_request_url, params=params)
-    # Check the status of the dataset preparation
-    status_url = [url for url in urls["allURLs"] if re.match(r'.*async_results.*', url)][0]
-    status_url = status_url + "/status.txt"
-    status = SESSION.get(status_url)
-    dt = 0
-    while status.status_code != requests.codes.ok:
-        time.sleep(2)
-        dt += 2
-        if dt%2 == 0 and dt%5 == 0:
-            print("Waiting for request to process")
-        status = SESSION.get(status_url)
+    logger.info("Waiting for request to process for %s %s %s", refdes, method, stream)
+    urls = get_api(data_request_url, params=params) or {}
+    all_urls = urls.get("allURLs", [])
+    
+    # find status_url
+    status_candidates = [u for u in all_urls if re.search(r'async_results', u)]
+    if not status_candidates:
+        # If no async_results, try to find thredds url directly
+        thredds_candidates = [u for u in all_urls if 'thredds' in u]
+        thredds_url = thredds_candidates[0] if thredds_candidates else None
+    else:
+        status_url = status_candidates[0].rstrip("/") + "/status.txt"
+        start = time.time()
+        while True:
+            try:
+                status_resp = SESSION.get(status_url, timeout=DEFAULT_TIMEOUT)
+                if status_resp.status_code == requests.codes.ok:
+                    break
+            except requests.RequestException:
+                logger.debug("Waiting for async result at %s", status_url)
+            elapsed = time.time() - start
+            if elapsed > timeout_sec:
+                logger.error("Timed out waiting for THREDDS URL after %s seconds", timeout_sec)
+                raise TimeoutError(f"Timed out waiting for THREDDS URL (status {status_url})")
+            time.sleep(2)
 
-    # The asynchronous data request is contained in the 'allURLs' key,
-    # in which we want to find the url to the thredds server
-    for d in urls['allURLs']:
-        if 'thredds' in d:
-            thredds_url = d
+        # The asynchronous data request is contained in the 'allURLs' key,
+        # in which we want to find the url to the thredds server
+        for d in all_urls:
+            if 'thredds' in d:
+                thredds_url = d
+            else:
+                thredds_url = None
 
     return thredds_url
 
 
-def get_thredds_catalog(thredds_url):
+def get_thredds_catalog(thredds_url: str) -> List[str]:
     """
     Get the dataset catalog for the requested data stream.
 
     Parameters
     ----------
-    thredds_url (str): the THREDDS server url for the
-        requested data stream
+    thredds_url: str
+        the THREDDS server url for the requested data stream
 
     Returns
     -------
-    catalog (list): the THREDDS catalog of datasets for
-        the requested data stream
+    list of str
+        The THREDDS catalog of datasets for the requested data stream
     """
     # Parse out the dataset_id from the thredds url
-    page = SESSION.get(thredds_url).text
+    try:
+        page = SESSION.get(thredds_url, timeout=DEFAULT_TIMEOUT).text
+    except requests.RequestException as e:
+        logger.error("Error fetching THREDDS catalog %s: %s", thredds_url, e)
+        return []
+    
     soup = BeautifulSoup(page, "html.parser")
-    pattern = re.compile('.*\\.nc$')
+    pattern = re.compile(r'.*\.nc$')
     catalog = sorted([node.get('href') for node in soup.find_all('a', text=pattern)])
-
+    
     # Return the catalog
     return catalog
 
 
-def download_netCDF_files(catalog, goldCopy=False, saveDir=None, verbose=True):
-    """Download netCDF files for given netCDF datasets.
+def download_netCDF_files(catalog: List[str], goldCopy: bool = False, saveDir: Optional[str] = None, verbose: bool = True):
+    """
+    Download netCDF files for given netCDF datasets.
 
     Downloads the netCDF files returned by parse_catalog. If no path is
     specified for the save directory, will download the files to the
@@ -746,82 +870,99 @@ def download_netCDF_files(catalog, goldCopy=False, saveDir=None, verbose=True):
 
     Parameters
     ----------
-    catalog: (list)
+    catalog: list of str
         The netCDF catalog which to download
-    goldCopy: (boolean)
+    goldCopy: bool, optional
         If you should use the gold copy thredds server (which is static)
-    saveDir: (str)
+    saveDir: str or None, optional
         The path to the directory where to download the netCDF files. If no path
         is specified will download to your current directory
-    verbose: (boolean)
+    verbose: bool, optional
         If True, show status of download.
     """
     # Step 1 - parse the catalog to get the correct web address to download the files
-    if goldCopy is True:
-        fileServer = URLS["goldCopy_fileServer"]
-    else:
-        fileServer = URLS["fileServer"]
-    netCDF_files = [re.sub("catalog.html\?dataset=", fileServer, file) for file in catalog]
+    fileServer = URLS["goldCopy_fileServer"] if goldCopy else URLS["fileServer"]
+    netCDF_files = [re.sub(r"catalog.html\?dataset=", fileServer, file) for file in catalog]
 
     # Step 2 - Specify and make the relevant save directory
     setup_download_dir(saveDir)
+    target_dir = Path(saveDir or os.getcwd())
 
     # Step 3 - Initialize workers
     # 3A. Identify number availabe cores and divide in half
-    cores = os.cpu_count()
-    workers = int(cores / 2)
+    cores = os.cpu_count() or 1
+    workers = max(1, cores // 2)
     # 3B. Setup a Queue
     queue = Queue()
     # 3C. Start workers
-    for worker in range(workers):
-        worker = DownloadWorker(queue)
-        worker.daemon = True
-        worker.start()
+    for _ in range(workers):
+        w = DownloadWorker(queue)
+        w.daemon = True
+        w.start()
 
     # Step 4. Execute the processes and download the files
-    print("----- Downloading files -----")
-    for file in netCDF_files:
-        queue.put((saveDir, file))
+    if verbose:
+        logger.info("----- Downloading files -----")
+    for file_url in netCDF_files:
+        queue.put((str(target_dir), file_url))
     # Execute
     queue.join()
 
 
 def clean_catalog(catalog, stream, deployments=None):
-    """Clean up the THREDDS catalog of unwanted datasets"""
+    """
+    Clean a THREDDS catalog list by removing empty datasets and filtering by stream or deployments.
+
+    Parameters
+    ----------
+    catalog : list of str
+        Raw catalog entries (hrefs).
+    stream : str
+        Target stream substring to keep as primary datasets.
+    deployments : pandas.DataFrame or None, optional
+        If provided, filters datasets to only include datasets with deployment numbers appearing in this DataFrame.
+
+    Returns
+    -------
+    tuple (datasets, ancillary)
+    datasets : list of str
+        Filtered list of datasets matching the requested stream and deployments.
+    ancillary : list of str
+        Remaining ancillary dataset entries.
+    """
     # Next, check that the netCDF datasets are not empty by getting the timestamps in the
-    # datasets and checking if they are 
-    datasets = []
-    for dset in catalog:
-        # Get the timestamps
-        timestamps = dset.split("_")[-1].replace(".nc","").split("-")
-        t1, t2 = timestamps
-        # Check if the timestamps are equal
-        if t1 == t2:
-            pass
-        else:
-            datasets.append(dset)
+    # datasets and remove datasets with identical t1 == t2 timestamps (empty) 
+    valid_datasets = []
+    try:
+        timestamps = dset.split("_")[-1].replace(".nc", "").split("-")
+        t1, t2 = timestamps[0], timestamps[-1]
+        if t1 != t2:
+            valid_datasets.append(dset)
+    except Exception:
+        # if pattern unexpected, keep the dataset (safer)
+        valid_datasets.append(dset)
             
     # Next, check if you want to filter for certain deployments
     if deployments is not None:
         # Check that the deployments are a list
-        deployments = list(deployments["deploymentNumber"].astype(int))
-        datasets = []
-        for dset in catalog:
-            dep = re.findall("deployment[\d]{4}", dset)[0]
-            depNum = int(dep[-4:])
-            if depNum not in deployments:
-                pass
-            else:
-                datasets.append(dset)        
+        dep_list = list(deployments["deploymentNumber"].astype(int).tolist())
+        filtered = []
+        for dset in valid_datasets:
+            match = re.search(r"deployment(\d{4})", dset)
+            if not match:
+                continue
+            depNum = int(match.group(1))
+            if depNum in dep_list:
+                filtered.append(dset)
+        valid_datasets = filtered      
         
     # Finally, determine if the dataset is either for the given instrument
     # or an ancillary instrument which supplies and input variable
-    catalog = datasets
     datasets = []
     ancillary = []
-    for dset in catalog:
-        check = dset.split("/")[-1]
-        if stream in check:
+    for dset in valid_datasets:
+        basename = dset.split("/")[-1]
+        if stream in basename:
             datasets.append(dset)
         else:
             ancillary.append(dset)
